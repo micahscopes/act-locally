@@ -1,4 +1,4 @@
-use std::future::Future;
+use std::{any::Any, future::Future};
 
 use futures::{future::LocalBoxFuture, FutureExt};
 
@@ -191,10 +191,242 @@ impl<S: 'static, C: 'static, R: 'static> SyncFuncHandlerImmutable<S, C, R> {
     }
 }
 
+pub(crate) type BoxedAny = Box<dyn Any + Send>;
+
+trait MessageHandler<S>: Send + Sync {
+    fn handle<'a>(
+        &'a self,
+        state: &'a mut S,
+        message: BoxedAny,
+    ) -> LocalBoxFuture<'a, Result<BoxedAny, ActorError>>;
+}
+
+impl<S, C, R> MessageHandler<S> for AsyncFuncHandler<S, C, R>
+where
+    S: 'static,
+    C: 'static + Send,
+    R: 'static + Send,
+{
+    fn handle<'a>(
+        &'a self,
+        state: &'a mut S,
+        message: BoxedAny,
+    ) -> LocalBoxFuture<'a, Result<BoxedAny, ActorError>> {
+        Box::pin(async move {
+            let params = message.downcast::<C>().map_err(|_| {
+                println!("Downcast error in handle");
+                ActorError::CustomError(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid message type",
+                )))
+            })?;
+            let result = (self.func)(state, *params).await?;
+            Ok(Box::new(result) as BoxedAny)
+        })
+    }
+}
+
+impl<S, C, R> MessageHandler<S> for AsyncFuncHandlerImmutable<S, C, R>
+where
+    S: 'static,
+    C: 'static + Send,
+    R: 'static + Send,
+{
+    fn handle<'a>(
+        &'a self,
+        state: &'a mut S,
+        message: BoxedAny,
+    ) -> LocalBoxFuture<'a, Result<BoxedAny, ActorError>> {
+        Box::pin(async move {
+            let params = message.downcast::<C>().map_err(|_| {
+                println!("Downcast error in handle");
+                ActorError::CustomError(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid message type",
+                )))
+            })?;
+            let result = (self.func)(state, *params).await?;
+            Ok(Box::new(result) as BoxedAny)
+        })
+    }
+}
+
+impl<S, C, R> MessageHandler<S> for SyncFuncHandler<S, C, R>
+where
+    S: 'static,
+    C: 'static + Send,
+    R: 'static + Send,
+{
+    fn handle<'a>(
+        &'a self,
+        state: &'a mut S,
+        message: BoxedAny,
+    ) -> LocalBoxFuture<'a, Result<BoxedAny, ActorError>> {
+        Box::pin(async move {
+            let params = message.downcast::<C>().map_err(|_| {
+                println!("Downcast error in handle");
+                ActorError::CustomError(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid message type",
+                )))
+            })?;
+            let result = (self.func)(state, *params)?;
+            Ok(Box::new(result) as BoxedAny)
+        })
+    }
+}
+
+impl<S, C, R> MessageHandler<S> for SyncFuncHandlerImmutable<S, C, R>
+where
+    S: 'static,
+    C: 'static + Send,
+    R: 'static + Send,
+{
+    fn handle<'a>(
+        &'a self,
+        state: &'a mut S,
+        message: BoxedAny,
+    ) -> LocalBoxFuture<'a, Result<BoxedAny, ActorError>> {
+        Box::pin(async move {
+            let params = message.downcast::<C>().map_err(|_| {
+                println!("Downcast error in handle");
+                ActorError::CustomError(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid message type",
+                )))
+            })?;
+            let result = (self.func)(state, *params)?;
+            Ok(Box::new(result) as BoxedAny)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use futures::executor::block_on;
+
+    #[test]
+    fn test_async_func_handler_immutable_message_handler() {
+        let mut state = 0u64;
+        async fn handler_fn(s: &u64, c: u64) -> Result<u64, ActorError> {
+            Ok(s + c)
+        }
+
+        let handler = AsyncFuncHandlerImmutable::new(handler_fn);
+
+        let message = Box::new(10u64);
+        let result = block_on(handler.handle(&mut state, message));
+
+        let result = result.unwrap().downcast::<u64>().unwrap();
+        assert_eq!(*result, 10);
+    }
+
+    #[test]
+    fn test_async_func_handler_message_handler() {
+        let mut state = 0;
+        async fn handler_fn(s: &mut u64, c: u64) -> Result<u64, ActorError> {
+            *s += c;
+            Ok(*s)
+        }
+
+        let handler = AsyncFuncHandler::new(handler_fn);
+
+        let message = Box::new(10u64);
+        let result = block_on(handler.handle(&mut state, message));
+        let result = result.unwrap().downcast::<u64>().unwrap();
+        assert_eq!(*result, 10);
+    }
+
+    #[test]
+    fn test_sync_func_handler_immutable_message_handler() {
+        let mut state = 0;
+        fn handler_fn(s: &u64, c: u64) -> Result<u64, ActorError> {
+            Ok(s + c)
+        }
+
+        let handler = SyncFuncHandlerImmutable::new(handler_fn);
+
+        let message = Box::new(10u64);
+        let result = block_on(handler.handle(&mut state, message));
+        let result = result.unwrap().downcast::<u64>().unwrap();
+        assert_eq!(*result, 10);
+    }
+
+    #[test]
+    fn test_sync_func_handler_message_handler() {
+        let mut state = 0;
+        fn handler_fn(s: &mut u64, c: u64) -> Result<u64, ActorError> {
+            *s += c;
+            Ok(*s)
+        }
+
+        let handler = SyncFuncHandler::new(handler_fn);
+
+        let message = Box::new(10u64);
+        let result = block_on(handler.handle(&mut state, message));
+        let result = result.unwrap().downcast::<u64>().unwrap();
+        assert_eq!(*result, 10);
+    }
+
+    #[test]
+    fn test_store_handlers_in_hashmap() {
+        use std::collections::HashMap;
+
+        let mut state = 0u64;
+
+        async fn async_handler_mut(s: &mut u64, c: u64) -> Result<u64, ActorError> {
+            *s += c;
+            Ok(*s)
+        }
+
+        async fn async_handler_immut(s: &u64, c: u64) -> Result<u64, ActorError> {
+            Ok(*s)
+        }
+
+        fn sync_handler_mut(s: &mut u64, c: u64) -> Result<u64, ActorError> {
+            *s += c;
+            Ok(*s)
+        }
+
+        fn sync_handler_immut(s: &u64, c: u64) -> Result<u64, ActorError> {
+            Ok(*s)
+        }
+
+        let mut handlers: HashMap<&str, Box<dyn MessageHandler<u64>>> = HashMap::new();
+
+        handlers.insert(
+            "async_mut",
+            Box::new(AsyncFuncHandler::new(async_handler_mut)),
+        );
+        handlers.insert(
+            "async_immut",
+            Box::new(AsyncFuncHandlerImmutable::new(async_handler_immut)),
+        );
+        handlers.insert("sync_mut", Box::new(SyncFuncHandler::new(sync_handler_mut)));
+        handlers.insert(
+            "sync_immut",
+            Box::new(SyncFuncHandlerImmutable::new(sync_handler_immut)),
+        );
+
+        let message = Box::new(10u64);
+
+        let result = block_on(handlers["async_mut"].handle(&mut state, message.clone()));
+        let result = result.unwrap().downcast::<u64>().unwrap();
+        assert_eq!(*result, 10);
+
+        let result = block_on(handlers["async_immut"].handle(&mut state, message.clone()));
+        let result = result.unwrap().downcast::<u64>().unwrap();
+        assert_eq!(*result, 10);
+
+        let result = block_on(handlers["sync_mut"].handle(&mut state, message.clone()));
+        let result = result.unwrap().downcast::<u64>().unwrap();
+        assert_eq!(*result, 20);
+
+        let result = block_on(handlers["sync_immut"].handle(&mut state, message.clone()));
+        let result = result.unwrap().downcast::<u64>().unwrap();
+        assert_eq!(*result, 20);
+    }
 
     #[test]
     fn test_async_func_handler_immutable() {
