@@ -29,7 +29,7 @@ impl std::fmt::Display for ActorError {
 
 impl std::error::Error for ActorError {}
 
-pub trait AsyncFunc<'a, S, C, R, E>: Fn(&'a mut S, C) -> Self::Fut + Send + Sync
+pub trait AsyncMutatingFunc<'a, S, C, R, E>: Fn(&'a mut S, C) -> Self::Fut + Send + Sync
 where
     S: 'static,
     C: 'static,
@@ -39,7 +39,7 @@ where
     type Fut: Future<Output = Result<R, E>> + Send;
 }
 
-impl<'a, F, S, C, R, E, Fut> AsyncFunc<'a, S, C, R, E> for F
+impl<'a, F, S, C, R, E, Fut> AsyncMutatingFunc<'a, S, C, R, E> for F
 where
     F: Fn(&'a mut S, C) -> Fut + Send + Sync,
     S: 'static,
@@ -51,7 +51,7 @@ where
     type Fut = Fut;
 }
 
-pub trait AsyncFuncImmutable<'a, S, C, R, E>: Fn(&'a S, C) -> Self::Fut + Send + Sync
+pub trait AsyncFunc<'a, S, C, R, E>: Fn(&'a S, C) -> Self::Fut + Send + Sync
 where
     S: 'static,
     C: 'static,
@@ -61,7 +61,7 @@ where
     type Fut: Future<Output = Result<R, E>> + Send;
 }
 
-impl<'a, F, S, C, R, E, Fut> AsyncFuncImmutable<'a, S, C, R, E> for F
+impl<'a, F, S, C, R, E, Fut> AsyncFunc<'a, S, C, R, E> for F
 where
     F: Fn(&'a S, C) -> Fut + Send + Sync,
     S: 'static,
@@ -73,20 +73,41 @@ where
     type Fut = Fut;
 }
 
-type BoxAsyncFunc<S, C, R> =
+type BoxAsyncMutatingFunc<S, C, R> =
     Box<dyn for<'a> Fn(&'a mut S, C) -> LocalBoxFuture<'a, Result<R, ActorError>> + Send + Sync>;
 
-struct AsyncFuncHandler<S, C, R> {
+struct AsyncMutatingHandler<S, C, R> {
+    func: BoxAsyncMutatingFunc<S, C, R>,
+}
+
+impl<S: 'static, C: 'static, R: 'static> AsyncMutatingHandler<S, C, R> {
+    fn new<F, E>(f: F) -> Self
+    where
+        F: for<'a> AsyncMutatingFunc<'a, S, C, R, E> + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        AsyncMutatingHandler {
+            func: Box::new(move |s, c| {
+                Box::pin(f(s, c).map(|r| r.map_err(|e| ActorError::CustomError(Box::new(e)))))
+            }),
+        }
+    }
+}
+
+type BoxAsyncFunc<S, C, R> =
+    Box<dyn for<'a> Fn(&'a S, C) -> LocalBoxFuture<'a, Result<R, ActorError>> + Send + Sync>;
+
+struct AsyncHandler<S, C, R> {
     func: BoxAsyncFunc<S, C, R>,
 }
 
-impl<S: 'static, C: 'static, R: 'static> AsyncFuncHandler<S, C, R> {
+impl<S: 'static, C: 'static, R: 'static> AsyncHandler<S, C, R> {
     fn new<F, E>(f: F) -> Self
     where
         F: for<'a> AsyncFunc<'a, S, C, R, E> + 'static,
         E: std::error::Error + Send + Sync + 'static,
     {
-        AsyncFuncHandler {
+        AsyncHandler {
             func: Box::new(move |s, c| {
                 Box::pin(f(s, c).map(|r| r.map_err(|e| ActorError::CustomError(Box::new(e)))))
             }),
@@ -94,28 +115,26 @@ impl<S: 'static, C: 'static, R: 'static> AsyncFuncHandler<S, C, R> {
     }
 }
 
-type BoxAsyncFuncImmutable<S, C, R> =
-    Box<dyn for<'a> Fn(&'a S, C) -> LocalBoxFuture<'a, Result<R, ActorError>> + Send + Sync>;
-
-struct AsyncFuncHandlerImmutable<S, C, R> {
-    func: BoxAsyncFuncImmutable<S, C, R>,
+pub trait SyncMutatingFunc<'a, S, C, R, E>: Fn(&'a mut S, C) -> Result<R, E> + Send + Sync
+where
+    S: 'static,
+    C: 'static,
+    R: 'static,
+    E: std::error::Error + Send + Sync + 'static,
+{
 }
 
-impl<S: 'static, C: 'static, R: 'static> AsyncFuncHandlerImmutable<S, C, R> {
-    fn new<F, E>(f: F) -> Self
-    where
-        F: for<'a> AsyncFuncImmutable<'a, S, C, R, E> + 'static,
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        AsyncFuncHandlerImmutable {
-            func: Box::new(move |s, c| {
-                Box::pin(f(s, c).map(|r| r.map_err(|e| ActorError::CustomError(Box::new(e)))))
-            }),
-        }
-    }
+impl<'a, F, S, C, R, E> SyncMutatingFunc<'a, S, C, R, E> for F
+where
+    F: Fn(&'a mut S, C) -> Result<R, E> + Send + Sync,
+    S: 'static,
+    C: 'static,
+    R: 'static,
+    E: std::error::Error + Send + Sync + 'static,
+{
 }
 
-pub trait SyncFunc<'a, S, C, R, E>: Fn(&'a mut S, C) -> Result<R, E> + Send + Sync
+pub trait SyncFunc<'a, S, C, R, E>: Fn(&'a S, C) -> Result<R, E> + Send + Sync
 where
     S: 'static,
     C: 'static,
@@ -126,25 +145,6 @@ where
 
 impl<'a, F, S, C, R, E> SyncFunc<'a, S, C, R, E> for F
 where
-    F: Fn(&'a mut S, C) -> Result<R, E> + Send + Sync,
-    S: 'static,
-    C: 'static,
-    R: 'static,
-    E: std::error::Error + Send + Sync + 'static,
-{
-}
-
-pub trait SyncFuncImmutable<'a, S, C, R, E>: Fn(&'a S, C) -> Result<R, E> + Send + Sync
-where
-    S: 'static,
-    C: 'static,
-    R: 'static,
-    E: std::error::Error + Send + Sync + 'static,
-{
-}
-
-impl<'a, F, S, C, R, E> SyncFuncImmutable<'a, S, C, R, E> for F
-where
     F: Fn(&'a S, C) -> Result<R, E> + Send + Sync,
     S: 'static,
     C: 'static,
@@ -153,39 +153,38 @@ where
 {
 }
 
-type BoxSyncFunc<S, C, R> =
+type BoxSyncMutatingFunc<S, C, R> =
     Box<dyn for<'a> Fn(&'a mut S, C) -> Result<R, ActorError> + Send + Sync>;
 
-struct SyncFuncHandler<S, C, R> {
-    func: BoxSyncFunc<S, C, R>,
+struct SyncMutatingHandler<S, C, R> {
+    func: BoxSyncMutatingFunc<S, C, R>,
 }
 
-impl<S: 'static, C: 'static, R: 'static> SyncFuncHandler<S, C, R> {
+impl<S: 'static, C: 'static, R: 'static> SyncMutatingHandler<S, C, R> {
     fn new<F, E>(f: F) -> Self
     where
-        F: for<'a> SyncFunc<'a, S, C, R, E> + 'static,
+        F: for<'a> SyncMutatingFunc<'a, S, C, R, E> + 'static,
         E: std::error::Error + Send + Sync + 'static,
     {
-        SyncFuncHandler {
+        SyncMutatingHandler {
             func: Box::new(move |s, c| f(s, c).map_err(|e| ActorError::CustomError(Box::new(e)))),
         }
     }
 }
 
-type BoxSyncFuncImmutable<S, C, R> =
-    Box<dyn for<'a> Fn(&'a S, C) -> Result<R, ActorError> + Send + Sync>;
+type BoxSyncFunc<S, C, R> = Box<dyn for<'a> Fn(&'a S, C) -> Result<R, ActorError> + Send + Sync>;
 
-struct SyncFuncHandlerImmutable<S, C, R> {
-    func: BoxSyncFuncImmutable<S, C, R>,
+struct SyncHandler<S, C, R> {
+    func: BoxSyncFunc<S, C, R>,
 }
 
-impl<S: 'static, C: 'static, R: 'static> SyncFuncHandlerImmutable<S, C, R> {
+impl<S: 'static, C: 'static, R: 'static> SyncHandler<S, C, R> {
     fn new<F, E>(f: F) -> Self
     where
-        F: for<'a> SyncFuncImmutable<'a, S, C, R, E> + 'static,
+        F: for<'a> SyncFunc<'a, S, C, R, E> + 'static,
         E: std::error::Error + Send + Sync + 'static,
     {
-        SyncFuncHandlerImmutable {
+        SyncHandler {
             func: Box::new(move |s, c| f(s, c).map_err(|e| ActorError::CustomError(Box::new(e)))),
         }
     }
@@ -201,7 +200,7 @@ trait MessageHandler<S>: Send + Sync {
     ) -> LocalBoxFuture<'a, Result<BoxedAny, ActorError>>;
 }
 
-impl<S, C, R> MessageHandler<S> for AsyncFuncHandler<S, C, R>
+impl<S, C, R> MessageHandler<S> for AsyncMutatingHandler<S, C, R>
 where
     S: 'static,
     C: 'static + Send,
@@ -226,7 +225,7 @@ where
     }
 }
 
-impl<S, C, R> MessageHandler<S> for AsyncFuncHandlerImmutable<S, C, R>
+impl<S, C, R> MessageHandler<S> for AsyncHandler<S, C, R>
 where
     S: 'static,
     C: 'static + Send,
@@ -251,7 +250,7 @@ where
     }
 }
 
-impl<S, C, R> MessageHandler<S> for SyncFuncHandler<S, C, R>
+impl<S, C, R> MessageHandler<S> for SyncMutatingHandler<S, C, R>
 where
     S: 'static,
     C: 'static + Send,
@@ -276,7 +275,7 @@ where
     }
 }
 
-impl<S, C, R> MessageHandler<S> for SyncFuncHandlerImmutable<S, C, R>
+impl<S, C, R> MessageHandler<S> for SyncHandler<S, C, R>
 where
     S: 'static,
     C: 'static + Send,
@@ -307,13 +306,13 @@ mod tests {
     use futures::executor::block_on;
 
     #[test]
-    fn test_async_func_handler_immutable_message_handler() {
+    fn test_async_non_mutating_message_handler() {
         let mut state = 0u64;
         async fn handler_fn(s: &u64, c: u64) -> Result<u64, ActorError> {
             Ok(s + c)
         }
 
-        let handler = AsyncFuncHandlerImmutable::new(handler_fn);
+        let handler = AsyncHandler::new(handler_fn);
 
         let message = Box::new(10u64);
         let result = block_on(handler.handle(&mut state, message));
@@ -323,14 +322,14 @@ mod tests {
     }
 
     #[test]
-    fn test_async_func_handler_message_handler() {
+    fn test_async_mutating_message_handler() {
         let mut state = 0;
         async fn handler_fn(s: &mut u64, c: u64) -> Result<u64, ActorError> {
             *s += c;
             Ok(*s)
         }
 
-        let handler = AsyncFuncHandler::new(handler_fn);
+        let handler = AsyncMutatingHandler::new(handler_fn);
 
         let message = Box::new(10u64);
         let result = block_on(handler.handle(&mut state, message));
@@ -339,13 +338,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_func_handler_immutable_message_handler() {
+    fn test_sync_non_mutating_message_handler() {
         let mut state = 0;
         fn handler_fn(s: &u64, c: u64) -> Result<u64, ActorError> {
             Ok(s + c)
         }
 
-        let handler = SyncFuncHandlerImmutable::new(handler_fn);
+        let handler = SyncHandler::new(handler_fn);
 
         let message = Box::new(10u64);
         let result = block_on(handler.handle(&mut state, message));
@@ -354,14 +353,14 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_func_handler_message_handler() {
+    fn test_sync_mutating_message_handler() {
         let mut state = 0;
         fn handler_fn(s: &mut u64, c: u64) -> Result<u64, ActorError> {
             *s += c;
             Ok(*s)
         }
 
-        let handler = SyncFuncHandler::new(handler_fn);
+        let handler = SyncMutatingHandler::new(handler_fn);
 
         let message = Box::new(10u64);
         let result = block_on(handler.handle(&mut state, message));
@@ -397,17 +396,17 @@ mod tests {
 
         handlers.insert(
             "async_mut",
-            Box::new(AsyncFuncHandler::new(async_handler_mut)),
+            Box::new(AsyncMutatingHandler::new(async_handler_mut)),
         );
         handlers.insert(
             "async_immut",
-            Box::new(AsyncFuncHandlerImmutable::new(async_handler_immut)),
+            Box::new(AsyncHandler::new(async_handler_immut)),
         );
-        handlers.insert("sync_mut", Box::new(SyncFuncHandler::new(sync_handler_mut)));
         handlers.insert(
-            "sync_immut",
-            Box::new(SyncFuncHandlerImmutable::new(sync_handler_immut)),
+            "sync_mut",
+            Box::new(SyncMutatingHandler::new(sync_handler_mut)),
         );
+        handlers.insert("sync_immut", Box::new(SyncHandler::new(sync_handler_immut)));
 
         let message = Box::new(10u64);
 
@@ -429,54 +428,54 @@ mod tests {
     }
 
     #[test]
-    fn test_async_func_handler_immutable() {
+    fn test_async_non_mutating_func_wrapper() {
         let state = 0;
         async fn handler_fn(s: &u64, c: u64) -> Result<u64, ActorError> {
             Ok(s + c)
         }
 
-        let handler = AsyncFuncHandlerImmutable::new(handler_fn);
+        let handler = AsyncHandler::new(handler_fn);
 
         let result = block_on((handler.func)(&state, 10));
         assert_eq!(result.unwrap(), 10);
     }
 
     #[test]
-    fn test_async_func_handler() {
+    fn test_async_mutating_func_wrapper() {
         let mut state = 0;
         async fn handler_fn(s: &mut u64, c: u64) -> Result<u64, ActorError> {
             *s += c;
             Ok(*s)
         }
 
-        let handler = AsyncFuncHandler::new(handler_fn);
+        let handler = AsyncMutatingHandler::new(handler_fn);
 
         let result = block_on((handler.func)(&mut state, 10));
         assert_eq!(result.unwrap(), 10);
     }
 
     #[test]
-    fn test_sync_func_handler_immutable() {
+    fn test_sync_non_mutating_func_wrapper() {
         let state = 0;
         fn handler_fn(s: &u64, c: u64) -> Result<u64, ActorError> {
             Ok(s + c)
         }
 
-        let handler = SyncFuncHandlerImmutable::new(handler_fn);
+        let handler = SyncHandler::new(handler_fn);
 
         let result = (handler.func)(&state, 10);
         assert_eq!(result.unwrap(), 10);
     }
 
     #[test]
-    fn test_sync_func_handler() {
+    fn test_sync_mutating_func_wrapper() {
         let mut state = 0;
         fn handler_fn(s: &mut u64, c: u64) -> Result<u64, ActorError> {
             *s += c;
             Ok(*s)
         }
 
-        let handler = SyncFuncHandler::new(handler_fn);
+        let handler = SyncMutatingHandler::new(handler_fn);
 
         let result = (handler.func)(&mut state, 10);
         assert_eq!(result.unwrap(), 10);
