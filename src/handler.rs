@@ -5,9 +5,6 @@ use futures::{future::LocalBoxFuture, FutureExt};
 #[derive(Debug)]
 pub enum ActorError {
     HandlerNotFound,
-    // DispatcherNotFound,
-    // StateAccessError,
-    // ExecutionError(Box<dyn std::error::Error + Send + Sync>),
     CustomError(Box<dyn std::error::Error + Send + Sync>),
     SendError,
     DispatchError,
@@ -17,9 +14,6 @@ impl std::fmt::Display for ActorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ActorError::HandlerNotFound => write!(f, "Handler not found"),
-            // ActorError::DispatcherNotFound => write!(f, "Dispatcher not found"),
-            // ActorError::StateAccessError => write!(f, "Failed to access actor state"),
-            // ActorError::ExecutionError(e) => write!(f, "Execution error: {}", e),
             ActorError::CustomError(e) => write!(f, "Custom error: {}", e),
             ActorError::SendError => write!(f, "Failed to send message"),
             ActorError::DispatchError => write!(f, "Failed to dispatch message"),
@@ -32,7 +26,7 @@ impl std::error::Error for ActorError {}
 pub trait AsyncMutatingFunc<'a, S, C, R, E>: Fn(&'a mut S, C) -> Self::Fut + Send + Sync
 where
     S: 'static,
-    C: 'static,
+    C: 'static, // Ensured `C` implements `Clone`
     R: 'static,
     E: std::error::Error + Send + Sync + 'static,
 {
@@ -43,7 +37,7 @@ impl<'a, F, S, C, R, E, Fut> AsyncMutatingFunc<'a, S, C, R, E> for F
 where
     F: Fn(&'a mut S, C) -> Fut + Send + Sync,
     S: 'static,
-    C: 'static,
+    C: 'static + Clone, // Ensured `C` implements `Clone`
     R: 'static,
     E: std::error::Error + Send + Sync + 'static,
     Fut: Future<Output = Result<R, E>> + Send,
@@ -192,111 +186,116 @@ impl<S: 'static, C: 'static, R: 'static> SyncHandler<S, C, R> {
 
 pub(crate) type BoxedAny = Box<dyn Any + Send>;
 
+// Define a common Message trait with an `as_any` method
+pub trait Message: Any + Send {
+    fn as_any(&self) -> &dyn Any;
+}
+
+// Blanket implementation for all types that satisfy the trait bounds
+impl<T: Any + Send> Message for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// Updated MessageHandler trait with downcasting
 trait MessageHandler<S>: Send + Sync {
     fn handle<'a>(
         &'a self,
         state: &'a mut S,
-        message: BoxedAny,
-    ) -> LocalBoxFuture<'a, Result<BoxedAny, ActorError>>;
+        message: &dyn Message,
+    ) -> LocalBoxFuture<'a, Result<Box<dyn Any + Send>, ActorError>>;
 }
 
+// Example Update for AsyncMutatingHandler
 impl<S, C, R> MessageHandler<S> for AsyncMutatingHandler<S, C, R>
 where
     S: 'static,
-    C: 'static + Send,
-    R: 'static + Send,
+    C: 'static + Send + Clone,
+    R: 'static + Send + Any,
 {
     fn handle<'a>(
         &'a self,
         state: &'a mut S,
-        message: BoxedAny,
-    ) -> LocalBoxFuture<'a, Result<BoxedAny, ActorError>> {
-        Box::pin(async move {
-            let params = message.downcast::<C>().map_err(|_| {
-                println!("Downcast error in handle");
-                ActorError::CustomError(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid message type",
-                )))
-            })?;
-            let result = (self.func)(state, *params).await?;
-            Ok(Box::new(result) as BoxedAny)
-        })
+        message: &dyn Message,
+    ) -> LocalBoxFuture<'a, Result<Box<dyn Any + Send>, ActorError>> {
+        if let Some(params) = message.as_any().downcast_ref::<C>() {
+            let result = (self.func)(state, params.clone());
+            Box::pin(async move {
+                result.await.map(|r| Box::new(r) as Box<dyn Any + Send>)
+            })
+        } else {
+            Box::pin(async { Err(ActorError::DispatchError) })
+        }
     }
 }
 
+// Example Update for AsyncHandler
 impl<S, C, R> MessageHandler<S> for AsyncHandler<S, C, R>
 where
     S: 'static,
-    C: 'static + Send,
-    R: 'static + Send,
+    C: 'static + Send + Clone,
+    R: 'static + Send + Any,
 {
     fn handle<'a>(
         &'a self,
         state: &'a mut S,
-        message: BoxedAny,
-    ) -> LocalBoxFuture<'a, Result<BoxedAny, ActorError>> {
-        Box::pin(async move {
-            let params = message.downcast::<C>().map_err(|_| {
-                println!("Downcast error in handle");
-                ActorError::CustomError(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid message type",
-                )))
-            })?;
-            let result = (self.func)(state, *params).await?;
-            Ok(Box::new(result) as BoxedAny)
-        })
+        message: &dyn Message,
+    ) -> LocalBoxFuture<'a, Result<Box<dyn Any + Send>, ActorError>> {
+        if let Some(params) = message.as_any().downcast_ref::<C>() {
+            let result = (self.func)(state, params.clone());
+            Box::pin(async move {
+                result.await.map(|r| Box::new(r) as Box<dyn Any + Send>)
+            })
+        } else {
+            Box::pin(async { Err(ActorError::DispatchError) })
+        }
     }
 }
 
+// Example Update for SyncMutatingHandler
 impl<S, C, R> MessageHandler<S> for SyncMutatingHandler<S, C, R>
 where
     S: 'static,
-    C: 'static + Send,
-    R: 'static + Send,
+    C: 'static + Send + Clone,
+    R: 'static + Send + Any,
 {
     fn handle<'a>(
         &'a self,
         state: &'a mut S,
-        message: BoxedAny,
-    ) -> LocalBoxFuture<'a, Result<BoxedAny, ActorError>> {
-        Box::pin(async move {
-            let params = message.downcast::<C>().map_err(|_| {
-                println!("Downcast error in handle");
-                ActorError::CustomError(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid message type",
-                )))
-            })?;
-            let result = (self.func)(state, *params)?;
-            Ok(Box::new(result) as BoxedAny)
-        })
+        message: &dyn Message,
+    ) -> LocalBoxFuture<'a, Result<Box<dyn Any + Send>, ActorError>> {
+        if let Some(params) = message.as_any().downcast_ref::<C>() {
+            let result = (self.func)(state, params.clone());
+            Box::pin(async move {
+                result.map(|r| Box::new(r) as Box<dyn Any + Send>)
+            })
+        } else {
+            Box::pin(async { Err(ActorError::DispatchError) })
+        }
     }
 }
 
+// Example Update for SyncHandler
 impl<S, C, R> MessageHandler<S> for SyncHandler<S, C, R>
 where
     S: 'static,
-    C: 'static + Send,
-    R: 'static + Send,
+    C: 'static + Send + Clone,
+    R: 'static + Send + Any,
 {
     fn handle<'a>(
         &'a self,
         state: &'a mut S,
-        message: BoxedAny,
-    ) -> LocalBoxFuture<'a, Result<BoxedAny, ActorError>> {
-        Box::pin(async move {
-            let params = message.downcast::<C>().map_err(|_| {
-                println!("Downcast error in handle");
-                ActorError::CustomError(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid message type",
-                )))
-            })?;
-            let result = (self.func)(state, *params)?;
-            Ok(Box::new(result) as BoxedAny)
-        })
+        message: &dyn Message,
+    ) -> LocalBoxFuture<'a, Result<Box<dyn Any + Send>, ActorError>> {
+        if let Some(params) = message.as_any().downcast_ref::<C>() {
+            let result = (self.func)(state, params.clone());
+            Box::pin(async move {
+                result.map(|r| Box::new(r) as Box<dyn Any + Send>)
+            })
+        } else {
+            Box::pin(async { Err(ActorError::DispatchError) })
+        }
     }
 }
 
@@ -315,7 +314,7 @@ mod tests {
         let handler = AsyncHandler::new(handler_fn);
 
         let message = Box::new(10u64);
-        let result = block_on(handler.handle(&mut state, message));
+        let result = block_on(handler.handle(&mut state, message.as_ref()));
 
         let result = result.unwrap().downcast::<u64>().unwrap();
         assert_eq!(*result, 10);
@@ -332,7 +331,7 @@ mod tests {
         let handler = AsyncMutatingHandler::new(handler_fn);
 
         let message = Box::new(10u64);
-        let result = block_on(handler.handle(&mut state, message));
+        let result = block_on(handler.handle(&mut state, message.as_ref()));
         let result = result.unwrap().downcast::<u64>().unwrap();
         assert_eq!(*result, 10);
     }
@@ -347,7 +346,7 @@ mod tests {
         let handler = SyncHandler::new(handler_fn);
 
         let message = Box::new(10u64);
-        let result = block_on(handler.handle(&mut state, message));
+        let result = block_on(handler.handle(&mut state, message.as_ref()));
         let result = result.unwrap().downcast::<u64>().unwrap();
         assert_eq!(*result, 10);
     }
@@ -363,7 +362,7 @@ mod tests {
         let handler = SyncMutatingHandler::new(handler_fn);
 
         let message = Box::new(10u64);
-        let result = block_on(handler.handle(&mut state, message));
+        let result = block_on(handler.handle(&mut state, message.as_ref()));
         let result = result.unwrap().downcast::<u64>().unwrap();
         assert_eq!(*result, 10);
     }
@@ -410,19 +409,19 @@ mod tests {
 
         let message = Box::new(10u64);
 
-        let result = block_on(handlers["async_mut"].handle(&mut state, message.clone()));
+        let result = block_on(handlers["async_mut"].handle(&mut state, message.as_ref()));
         let result = result.unwrap().downcast::<u64>().unwrap();
         assert_eq!(*result, 10);
 
-        let result = block_on(handlers["async_immut"].handle(&mut state, message.clone()));
+        let result = block_on(handlers["async_immut"].handle(&mut state, message.as_ref()));
         let result = result.unwrap().downcast::<u64>().unwrap();
         assert_eq!(*result, 10);
 
-        let result = block_on(handlers["sync_mut"].handle(&mut state, message.clone()));
+        let result = block_on(handlers["sync_mut"].handle(&mut state, message.as_ref()));
         let result = result.unwrap().downcast::<u64>().unwrap();
         assert_eq!(*result, 20);
 
-        let result = block_on(handlers["sync_immut"].handle(&mut state, message.clone()));
+        let result = block_on(handlers["sync_immut"].handle(&mut state, message.as_ref()));
         let result = result.unwrap().downcast::<u64>().unwrap();
         assert_eq!(*result, 20);
     }
