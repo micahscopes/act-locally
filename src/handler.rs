@@ -26,7 +26,7 @@ impl std::error::Error for ActorError {}
 pub trait AsyncMutatingFunc<'a, S, C, R, E>: Fn(&'a mut S, C) -> Self::Fut + Send + Sync
 where
     S: 'static,
-    C: 'static, // Ensured `C` implements `Clone`
+    C: 'static,
     R: 'static,
     E: std::error::Error + Send + Sync + 'static,
 {
@@ -37,7 +37,7 @@ impl<'a, F, S, C, R, E, Fut> AsyncMutatingFunc<'a, S, C, R, E> for F
 where
     F: Fn(&'a mut S, C) -> Fut + Send + Sync,
     S: 'static,
-    C: 'static + Clone, // Ensured `C` implements `Clone`
+    C: 'static,
     R: 'static,
     E: std::error::Error + Send + Sync + 'static,
     Fut: Future<Output = Result<R, E>> + Send,
@@ -198,8 +198,8 @@ impl<T: Any + Send> Message for T {
     }
 }
 
-// Updated MessageHandler trait with downcasting
-trait MessageHandler<S>: Send + Sync {
+// Define the AsyncMessageHandler trait
+trait AsyncMessageHandler<S>: Send + Sync {
     fn handle<'a>(
         &'a self,
         state: &'a mut S,
@@ -207,8 +207,17 @@ trait MessageHandler<S>: Send + Sync {
     ) -> LocalBoxFuture<'a, Result<Box<dyn Any + Send>, ActorError>>;
 }
 
-// Example Update for AsyncMutatingHandler
-impl<S, C, R> MessageHandler<S> for AsyncMutatingHandler<S, C, R>
+// Define the SyncMessageHandler trait
+trait SyncMessageHandler<S>: Send + Sync {
+    fn handle_sync<'a>(
+        &'a self,
+        state: &'a mut S,
+        message: &dyn Message,
+    ) -> Result<Box<dyn Any + Send>, ActorError>;
+}
+
+// Implement AsyncMessageHandler for AsyncMutatingHandler
+impl<S, C, R> AsyncMessageHandler<S> for AsyncMutatingHandler<S, C, R>
 where
     S: 'static,
     C: 'static + Send + Clone,
@@ -230,8 +239,8 @@ where
     }
 }
 
-// Example Update for AsyncHandler
-impl<S, C, R> MessageHandler<S> for AsyncHandler<S, C, R>
+// Implement AsyncMessageHandler for AsyncHandler
+impl<S, C, R> AsyncMessageHandler<S> for AsyncHandler<S, C, R>
 where
     S: 'static,
     C: 'static + Send + Clone,
@@ -253,8 +262,8 @@ where
     }
 }
 
-// Example Update for SyncMutatingHandler
-impl<S, C, R> MessageHandler<S> for SyncMutatingHandler<S, C, R>
+// Implement both AsyncMessageHandler and SyncMessageHandler for SyncMutatingHandler
+impl<S, C, R> AsyncMessageHandler<S> for SyncMutatingHandler<S, C, R>
 where
     S: 'static,
     C: 'static + Send + Clone,
@@ -276,8 +285,27 @@ where
     }
 }
 
-// Example Update for SyncHandler
-impl<S, C, R> MessageHandler<S> for SyncHandler<S, C, R>
+impl<S, C, R> SyncMessageHandler<S> for SyncMutatingHandler<S, C, R>
+where
+    S: 'static,
+    C: 'static + Send + Clone,
+    R: 'static + Send + Any,
+{
+    fn handle_sync<'a>(
+        &'a self,
+        state: &'a mut S,
+        message: &dyn Message,
+    ) -> Result<Box<dyn Any + Send>, ActorError> {
+        if let Some(params) = message.as_any().downcast_ref::<C>() {
+            (self.func)(state, params.clone()).map(|r| Box::new(r) as Box<dyn Any + Send>)
+        } else {
+            Err(ActorError::DispatchError)
+        }
+    }
+}
+
+// Implement both AsyncMessageHandler and SyncMessageHandler for SyncHandler
+impl<S, C, R> AsyncMessageHandler<S> for SyncHandler<S, C, R>
 where
     S: 'static,
     C: 'static + Send + Clone,
@@ -295,6 +323,25 @@ where
             })
         } else {
             Box::pin(async { Err(ActorError::DispatchError) })
+        }
+    }
+}
+
+impl<S, C, R> SyncMessageHandler<S> for SyncHandler<S, C, R>
+where
+    S: 'static,
+    C: 'static + Send + Clone,
+    R: 'static + Send + Any,
+{
+    fn handle_sync<'a>(
+        &'a self,
+        state: &'a mut S,
+        message: &dyn Message,
+    ) -> Result<Box<dyn Any + Send>, ActorError> {
+        if let Some(params) = message.as_any().downcast_ref::<C>() {
+            (self.func)(state, params.clone()).map(|r| Box::new(r) as Box<dyn Any + Send>)
+        } else {
+            Err(ActorError::DispatchError)
         }
     }
 }
@@ -391,7 +438,7 @@ mod tests {
             Ok(*s)
         }
 
-        let mut handlers: HashMap<&str, Box<dyn MessageHandler<u64>>> = HashMap::new();
+        let mut handlers: HashMap<&str, Box<dyn AsyncMessageHandler<u64>>> = HashMap::new();
 
         handlers.insert(
             "async_mut",
@@ -422,6 +469,42 @@ mod tests {
         assert_eq!(*result, 20);
 
         let result = block_on(handlers["sync_immut"].handle(&mut state, message.as_ref()));
+        let result = result.unwrap().downcast::<u64>().unwrap();
+        assert_eq!(*result, 20);
+    }
+    #[test]
+    fn test_store_sync_handlers_in_hashmap() {
+        use std::collections::HashMap;
+
+        let mut state = 0u64;
+
+        fn sync_handler_mut(s: &mut u64, c: u64) -> Result<u64, ActorError> {
+            *s += c;
+            Ok(*s)
+        }
+
+        fn sync_handler_immut(s: &u64, c: u64) -> Result<u64, ActorError> {
+            Ok(s + c)
+        }
+
+        let mut handlers: HashMap<&str, Box<dyn SyncMessageHandler<u64>>> = HashMap::new();
+
+        handlers.insert(
+            "sync_mut",
+            Box::new(SyncMutatingHandler::new(sync_handler_mut)),
+        );
+        handlers.insert(
+            "sync_immut",
+            Box::new(SyncHandler::new(sync_handler_immut)),
+        );
+
+        let message = Box::new(10u64);
+
+        let result = handlers["sync_mut"].handle_sync(&mut state, message.as_ref());
+        let result = result.unwrap().downcast::<u64>().unwrap();
+        assert_eq!(*result, 10);
+
+        let result = handlers["sync_immut"].handle_sync(&mut state, message.as_ref());
         let result = result.unwrap().downcast::<u64>().unwrap();
         assert_eq!(*result, 20);
     }
@@ -461,7 +544,7 @@ mod tests {
         }
 
         let handler = SyncHandler::new(handler_fn);
-
+        
         let result = (handler.func)(&state, 10);
         assert_eq!(result.unwrap(), 10);
     }
