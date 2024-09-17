@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 futures = "0.3.30"
 tokio = { version = "1.40.0", features = ["rt", "macros", "test-util"] }
+log = "0.4.22"
+
+[dev-dependencies]
