@@ -178,7 +178,7 @@ pub(crate) trait AsyncMessageHandler<S>: Send + Sync {
     fn handle<'a>(
         &'a self,
         state: &'a mut S,
-        message: &dyn Message,
+        message: Box<dyn Message>,
     ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>>;
 }
 
@@ -186,23 +186,23 @@ pub(crate) trait SyncMessageHandler<S>: Send + Sync {
     fn handle_sync<'a>(
         &'a self,
         state: &'a mut S,
-        message: &dyn Message,
+        message: Box<dyn Message>,
     ) -> Result<Box<dyn Any + Send>, ActorError>;
 }
 
 impl<S, C, R> AsyncMessageHandler<S> for AsyncMutatingHandler<S, C, R>
 where
     S: 'static,
-    C: 'static + Send + Clone,
+    C: 'static + Send,
     R: 'static + Send + Any,
 {
     fn handle<'a>(
         &'a self,
         state: &'a mut S,
-        message: &dyn Message,
+        message: Box<dyn Message>,
     ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>> {
-        if let Some(params) = message.downcast_ref::<C>() {
-            let result = (self.func)(state, params.clone());
+        if let Ok(params) = message.downcast::<C>() {
+            let result = (self.func)(state, *params);
             Box::pin(async move { result.await.map(|r| Box::new(r) as Box<dyn Response>) })
         } else {
             Box::pin(async { Err(ActorError::DispatchError) })
@@ -213,16 +213,16 @@ where
 impl<S, C, R> AsyncMessageHandler<S> for AsyncHandler<S, C, R>
 where
     S: 'static,
-    C: 'static + Send + Clone,
+    C: 'static + Send,
     R: 'static + Send + Any,
 {
     fn handle<'a>(
         &'a self,
         state: &'a mut S,
-        message: &dyn Message,
+        message: Box<dyn Message>,
     ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>> {
-        if let Some(params) = message.downcast_ref::<C>() {
-            let result = (self.func)(state, params.clone());
+        if let Ok(params) = message.downcast::<C>() {
+            let result = (self.func)(state, *params);
             Box::pin(async move { result.await.map(|r| Box::new(r) as Box<dyn Response>) })
         } else {
             Box::pin(async { Err(ActorError::DispatchError) })
@@ -233,16 +233,16 @@ where
 impl<S, C, R> AsyncMessageHandler<S> for SyncMutatingHandler<S, C, R>
 where
     S: 'static,
-    C: 'static + Send + Clone,
+    C: 'static + Send,
     R: 'static + Send + Any,
 {
     fn handle<'a>(
         &'a self,
         state: &'a mut S,
-        message: &dyn Message,
+        message: Box<dyn Message>,
     ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>> {
-        if let Some(params) = message.downcast_ref::<C>() {
-            let result = (self.func)(state, params.clone());
+        if let Ok(params) = message.downcast::<C>() {
+            let result = (self.func)(state, *params);
             Box::pin(async move { result.map(|r| Box::new(r) as Box<dyn Response>) })
         } else {
             Box::pin(async { Err(ActorError::DispatchError) })
@@ -253,16 +253,16 @@ where
 impl<S, C, R> SyncMessageHandler<S> for SyncMutatingHandler<S, C, R>
 where
     S: 'static,
-    C: 'static + Send + Clone,
+    C: 'static + Send,
     R: 'static + Send + Any,
 {
     fn handle_sync<'a>(
         &'a self,
         state: &'a mut S,
-        message: &dyn Message,
+        message: Box<dyn Message>,
     ) -> Result<Box<dyn Any + Send>, ActorError> {
-        if let Some(params) = message.downcast_ref::<C>() {
-            (self.func)(state, params.clone()).map(|r| Box::new(r) as Box<dyn Any + Send>)
+        if let Ok(params) = message.downcast::<C>() {
+            (self.func)(state, *params).map(|r| Box::new(r) as Box<dyn Any + Send>)
         } else {
             Err(ActorError::DispatchError)
         }
@@ -272,16 +272,16 @@ where
 impl<S, C, R> AsyncMessageHandler<S> for SyncHandler<S, C, R>
 where
     S: 'static,
-    C: 'static + Send + Clone,
+    C: 'static + Send,
     R: 'static + Send + Any,
 {
     fn handle<'a>(
         &'a self,
         state: &'a mut S,
-        message: &dyn Message,
+        message: Box<dyn Message>,
     ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>> {
-        if let Some(params) = message.downcast_ref::<C>() {
-            let result = (self.func)(state, params.clone());
+        if let Ok(params) = message.downcast::<C>() {
+            let result = (self.func)(state, *params);
             Box::pin(async move { result.map(|r| Box::new(r) as Box<dyn Response>) })
         } else {
             Box::pin(async { Err(ActorError::DispatchError) })
@@ -292,16 +292,17 @@ where
 impl<S, C, R> SyncMessageHandler<S> for SyncHandler<S, C, R>
 where
     S: 'static,
-    C: 'static + Send + Clone,
+    C: 'static + Send,
     R: 'static + Send + Any,
 {
     fn handle_sync<'a>(
         &'a self,
         state: &'a mut S,
-        message: &dyn Message,
+        message: Box<dyn Message>,
     ) -> Result<Box<dyn Any + Send>, ActorError> {
-        if let Some(params) = message.downcast_ref::<C>() {
-            (self.func)(state, params.clone()).map(|r| Box::new(r) as Box<dyn Any + Send>)
+        // let message = Box::new(*message).boxed_any_message();
+        if let Ok(params) = message.downcast::<C>() {
+            (self.func)(state, *params).map(|r| Box::new(r) as Box<dyn Any + Send>)
         } else {
             Err(ActorError::DispatchError)
         }
@@ -325,8 +326,8 @@ mod tests {
         let handler = AsyncHandler::new(handler_fn);
 
         let message = Box::new(10u64);
-        let result = block_on(handler.handle(&mut state, message.as_ref()))
-            .expect("Failed to handle message");
+        let result =
+            block_on(handler.handle(&mut state, message)).expect("Failed to handle message");
 
         let result = result.downcast_ref::<u64>().unwrap();
         assert_eq!(*result, 10);
@@ -343,10 +344,10 @@ mod tests {
         let handler = AsyncMutatingHandler::new(handler_fn);
 
         let message = Box::new(10u64);
-        let result = block_on(handler.handle(&mut state, message.as_ref()))
-            .expect("Failed to handle message");
+        let result =
+            block_on(handler.handle(&mut state, message)).expect("Failed to handle message");
         // let result = result.map(op)
-        let result = result.downcast_ref::<u64>().unwrap();
+        let result = result.downcast::<u64>().unwrap();
         assert_eq!(*result, 10);
     }
 
@@ -359,10 +360,10 @@ mod tests {
 
         let handler = SyncHandler::new(handler_fn);
 
-        let message = Box::new(10u64);
-        let result = block_on(handler.handle(&mut state, message.as_ref()))
-            .expect("Failed to handle message");
-        let result = result.downcast_ref::<u64>().unwrap();
+        let message: Box<dyn Message> = Box::new(10u64);
+        let result =
+            block_on(handler.handle(&mut state, message)).expect("Failed to handle message");
+        let result = result.downcast::<u64>().unwrap();
         assert_eq!(*result, 10);
     }
 
@@ -377,9 +378,9 @@ mod tests {
         let handler = SyncMutatingHandler::new(handler_fn);
 
         let message = Box::new(10u64);
-        let result = block_on(handler.handle(&mut state, message.as_ref()))
-            .expect("Failed to handle message");
-        let result = result.downcast_ref::<u64>().unwrap();
+        let result =
+            block_on(handler.handle(&mut state, message)).expect("Failed to handle message");
+        let result = result.downcast::<u64>().unwrap();
         assert_eq!(*result, 10);
     }
 
@@ -425,24 +426,27 @@ mod tests {
 
         let message = Box::new(10u64);
 
-        let result = block_on(handlers["async_mut"].handle(&mut state, message.as_ref()))
+        let result = block_on(handlers["async_mut"].handle(&mut state, message))
             .expect("Failed to handle message");
-        let result = result.downcast_ref::<u64>().unwrap();
+        let result = result.downcast::<u64>().unwrap();
         assert_eq!(*result, 10);
 
-        let result = block_on(handlers["async_immut"].handle(&mut state, message.as_ref()))
+        let message = Box::new(10u64);
+        let result = block_on(handlers["async_immut"].handle(&mut state, message))
             .expect("Failed to handle message");
-        let result = result.downcast_ref::<u64>().unwrap();
+        let result = result.downcast::<u64>().unwrap();
         assert_eq!(*result, 10);
 
-        let result = block_on(handlers["sync_mut"].handle(&mut state, message.as_ref()))
+        let message = Box::new(10u64);
+        let result = block_on(handlers["sync_mut"].handle(&mut state, message))
             .expect("Failed to handle message");
-        let result = result.downcast_ref::<u64>().unwrap();
+        let result = result.downcast::<u64>().unwrap();
         assert_eq!(*result, 20);
 
-        let result = block_on(handlers["sync_immut"].handle(&mut state, message.as_ref()))
+        let message = Box::new(10u64);
+        let result = block_on(handlers["sync_immut"].handle(&mut state, message))
             .expect("Failed to handle message");
-        let result = result.downcast_ref::<u64>().unwrap();
+        let result = result.downcast::<u64>().unwrap();
         assert_eq!(*result, 20);
     }
     #[test]
@@ -469,12 +473,12 @@ mod tests {
         handlers.insert("sync_immut", Box::new(SyncHandler::new(sync_handler_immut)));
 
         let message = Box::new(10u64);
-
-        let result = handlers["sync_mut"].handle_sync(&mut state, message.as_ref());
+        let result = handlers["sync_mut"].handle_sync(&mut state, message);
         let result = result.unwrap().downcast::<u64>().unwrap();
         assert_eq!(*result, 10);
 
-        let result = handlers["sync_immut"].handle_sync(&mut state, message.as_ref());
+        let message = Box::new(10u64);
+        let result = handlers["sync_immut"].handle_sync(&mut state, message);
         let result = result.unwrap().downcast::<u64>().unwrap();
         assert_eq!(*result, 20);
     }

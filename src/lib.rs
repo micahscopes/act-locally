@@ -1,5 +1,5 @@
 pub mod actor;
-mod dispatcher;
+pub mod dispatcher;
 pub mod handler;
 pub mod message;
-mod types;
+pub mod types;
