@@ -9,14 +9,17 @@ use crate::message::{
 use crate::types::ActorError;
 // use crate::registration::HandlerRegistration;
 use futures::channel::mpsc;
-use futures::StreamExt;
-use log::debug;
+use futures::{FutureExt, StreamExt};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::error::Error;
 use std::fmt::Debug;
+use std::panic::{self, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::mpsc::channel;
+use std::time::Duration;
 use tokio::runtime::Builder;
+use tracing::{error, info};
 
 type StateRef<S> = Rc<RefCell<S>>;
 
@@ -83,56 +86,109 @@ impl<S: 'static> Actor<S> {
         self.handlers.insert(key, Box::new(handler));
     }
 
-    pub fn spawn_local<F, D>(init: F) -> (ActorRef, D)
+    pub fn spawn_local<F, D>(init: F) -> Result<(ActorRef, D), ActorError>
     where
-        F: FnOnce() -> (Self, ActorRef, D),
-        F: Send + 'static,
-        D: Dispatcher,
+        F: FnOnce() -> Result<(Actor<S>, ActorRef, D), ActorError>,
+        F: 'static + Send,
+        D: Dispatcher + Send + 'static,
     {
-        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
-        let (tx, rx) = channel();
+        info!("Initializing spawn_local");
 
-        std::thread::spawn(move || {
+        // Create a channel to communicate between threads
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+
+        // Spawn a new thread for the actor
+        tokio::task::spawn_blocking(move || {
+            // Build the Tokio runtime
+            info!("Building Tokio runtime");
+            let runtime = Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to build Tokio runtime");
+            info!("Tokio runtime built successfully");
+
+            info!("Spawned new thread for actor");
             let local = tokio::task::LocalSet::new();
+
+            // Run the actor within the Tokio runtime
             local.block_on(&runtime, async move {
-                println!("Spawning actor");
-                let (mut actor, actor_ref, dispatcher) = init();
-                tx.send((actor_ref.clone(), dispatcher)).unwrap();
-                println!("Starting actor run loop");
-                actor.run().await;
-                println!("Actor run loop finished");
+                info!("Spawning actor");
+                match init() {
+                    Ok((mut actor, actor_ref, dispatcher)) => {
+                        tx.send(Ok((actor_ref.clone(), dispatcher))).unwrap();
+                        info!("Starting actor run loop");
+                        let _ = actor.run().await;
+                        // tokio::time::sleep(tokio::time::Duration::from_secs(200)).await;
+                    }
+                    Err(e) => {
+                        tx.send(Err(e)).unwrap();
+                        // return;
+                    }
+                };
+                info!("Actor run loop finished");
             });
         });
-        rx.recv().unwrap()
+
+        // Receive the ActorRef and Dispatcher from the spawned thread
+        rx.recv_timeout(Duration::from_secs(2))
+            .map_err(|e| ActorError::SpawnError(Box::new(e)))
+            .and_then(|result| match result {
+                Ok((actor_ref, dispatcher)) => {
+                    info!("Received ActorRef and Dispatcher from spawned thread");
+                    Ok((actor_ref, dispatcher))
+                }
+                Err(e) => {
+                    error!("Failed to receive ActorRef and Dispatcher: {:?}", e);
+                    Err(ActorError::SpawnError(Box::<ActorError>::new(e)))
+                }
+            })
     }
 
-    pub async fn run(&mut self) {
-        println!("Actor run loop started");
-        while let Some(message) = self.receiver.next().await {
-            match message {
-                ActorMessage::Notification(key, payload) => {
-                    if let Some(handler) = self.handlers.get(&key) {
-                        let mut state = self.state.borrow_mut();
-                        if let Err(e) = handler.handle(&mut *state, payload).await {
-                            println!("Handler error: {:?}", e);
+    pub async fn run(&mut self) -> Result<(), ActorError> {
+        let result = panic::AssertUnwindSafe(async {
+            info!("Actor run loop started");
+            while let Some(message) = self.receiver.next().await {
+                info!("Actor got a new message...");
+                match message {
+                    ActorMessage::Notification(key, payload) => {
+                        if let Some(handler) = self.handlers.get(&key) {
+                            info!("Handling notification with key: {key:?}");
+                            let mut state = self.state.borrow_mut();
+                            if let Err(e) = handler.handle(&mut *state, payload).await {
+                                info!("Handler error: {e:?}");
+                            }
+                        } else {
+                            error!("No handler found for key: {key:?}");
                         }
-                    } else {
-                        println!("No handler found for key: {:?}", key);
                     }
-                }
-                ActorMessage::Request(key, payload, response_tx) => {
-                    if let Some(handler) = self.handlers.get(&key) {
-                        let mut state = self.state.borrow_mut();
-                        let result = handler.handle(&mut *state, payload).await;
-                        let _ = response_tx.send(result);
-                    } else {
-                        println!("No handler found for key: {:?}", key);
-                        let _ = response_tx.send(Err(ActorError::HandlerNotFound));
+                    ActorMessage::Request(key, payload, response_tx) => {
+                        if let Some(handler) = self.handlers.get(&key) {
+                            info!("Handling request with key: {key:?}");
+                            let mut state = self.state.borrow_mut();
+                            let result = handler.handle(&mut *state, payload).await;
+                            let _ = response_tx.send(result);
+                        } else {
+                            error!("No handler found for key: {:?}", key);
+                            let _ = response_tx.send(Err(ActorError::HandlerNotFound));
+                        }
                     }
                 }
             }
+            info!("Actor run loop finished");
+        })
+        .catch_unwind()
+        .await;
+
+        match result {
+            Ok(_) => {
+                info!("Actor run loop somehow finished: {:?}", result);
+                Ok(())
+            }
+            Err(panic_info) => {
+                error!("Actor run loop panicked: {:?}", panic_info);
+                Err(ActorError::HandlerPanicked)
+            }
         }
-        println!("Actor run loop finished");
     }
 }
 
@@ -409,8 +465,9 @@ mod tests {
                 get_messages_handler,
             );
 
-            (actor, actor_ref, dispatcher)
-        });
+            Ok((actor, actor_ref, dispatcher))
+        })
+        .expect("Failed to spawn actor");
 
         // Test increment
         actor_ref

@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::boxed::Box;
+use std::error::Error;
 use std::fmt;
 
 pub type BoxedAny = Box<dyn Any + Send>;
@@ -7,10 +8,12 @@ pub type BoxedAny = Box<dyn Any + Send>;
 #[derive(Debug)]
 pub enum ActorError {
     HandlerNotFound,
-    CustomError(Box<dyn std::error::Error + Send + Sync>),
+    CustomError(Box<dyn Error + Send + Sync>),
     SendError,
     DispatchError,
     DowncastError,
+    HandlerPanicked,
+    SpawnError(Box<dyn Error + Send + Sync>),
 }
 
 impl fmt::Display for ActorError {
@@ -21,6 +24,8 @@ impl fmt::Display for ActorError {
             ActorError::SendError => write!(f, "Failed to send message"),
             ActorError::DispatchError => write!(f, "Failed to dispatch message"),
             ActorError::DowncastError => write!(f, "Failed to downcast message"),
+            ActorError::HandlerPanicked => write!(f, "Handler panicked"),
+            ActorError::SpawnError(e) => write!(f, "Failed to spawn actor due to error: {}", e),
         }
     }
 }
