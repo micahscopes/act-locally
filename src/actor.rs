@@ -7,18 +7,20 @@ use crate::message::{
     ActorMessage, Message, MessageDowncast, MessageKey, Response, ResponseDowncast,
 };
 use crate::types::ActorError;
+use ::futures::channel::mpsc;
 // use crate::registration::HandlerRegistration;
-use futures::channel::mpsc;
-use futures::{FutureExt, StreamExt};
+// use futures::channel::mpsc;
+use smol::future::{self, FutureExt};
+use smol::lock::futures;
+use smol::stream::StreamExt;
+use smol::LocalExecutor;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Debug;
 use std::panic::{self, AssertUnwindSafe};
 use std::rc::Rc;
-use std::sync::mpsc::channel;
 use std::time::Duration;
-use tokio::runtime::Builder;
 use tracing::{error, info};
 
 type StateRef<S> = Rc<RefCell<S>>;
@@ -98,35 +100,31 @@ impl<S: 'static> Actor<S> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
 
         // Spawn a new thread for the actor
-        tokio::task::spawn_blocking(move || {
-            // Build the Tokio runtime
-            info!("Building Tokio runtime");
-            let runtime = Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to build Tokio runtime");
-            info!("Tokio runtime built successfully");
-
-            info!("Spawned new thread for actor");
-            let local = tokio::task::LocalSet::new();
-
-            // Run the actor within the Tokio runtime
-            local.block_on(&runtime, async move {
+        info!("Spawning new thread for actor");
+        std::thread::spawn(move || {
+            info!("Building local executor on spawned thread");
+            let exec = LocalExecutor::new();
+            exec.spawn(async move {
                 info!("Spawning actor");
                 match init() {
                     Ok((mut actor, actor_ref, dispatcher)) => {
                         tx.send(Ok((actor_ref.clone(), dispatcher))).unwrap();
                         info!("Starting actor run loop");
-                        let _ = actor.run().await;
-                        // tokio::time::sleep(tokio::time::Duration::from_secs(200)).await;
+                        let run_result = AssertUnwindSafe(actor.run()).catch_unwind().await;
+                        if let Err(panic_info) = run_result {
+                            error!("Actor run loop panicked: {:?}", panic_info);
+                        }
                     }
                     Err(e) => {
+                        error!("Uh oh... Spawn error: {e:?}");
                         tx.send(Err(e)).unwrap();
-                        // return;
                     }
                 };
                 info!("Actor run loop finished");
-            });
+            })
+            .detach();
+
+            future::block_on(exec.run(future::pending::<()>()));
         });
 
         // Receive the ActorRef and Dispatcher from the spawned thread
@@ -206,7 +204,7 @@ impl ActorRef {
         let key = dispatcher.message_key(&message)?;
         let wrapped = dispatcher.wrap(Box::new(message), key.clone())?;
 
-        let (response_tx, response_rx) = futures::channel::oneshot::channel();
+        let (response_tx, response_rx) = ::futures::channel::oneshot::channel();
 
         self.sender
             .unbounded_send(ActorMessage::Request(key.clone(), wrapped, response_tx))
@@ -336,7 +334,10 @@ mod tests {
     use crate::message::Response;
 
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        thread::sleep,
+    };
 
     #[derive(Clone)]
     struct TestState {
@@ -427,7 +428,7 @@ mod tests {
     ) -> Result<Vec<String>, ActorError> {
         Ok(state.messages.clone())
     }
-    #[tokio::test]
+
     async fn test_actor_with_custom_dispatcher() {
         let (actor_ref, dispatcher) = Actor::spawn_local(|| {
             let mut dispatcher = TestDispatcher;
@@ -486,7 +487,7 @@ mod tests {
             .expect("Failed to send append World");
 
         // Allow some time for processing
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(100));
 
         // Test get_counter
         let counter: i32 = actor_ref
