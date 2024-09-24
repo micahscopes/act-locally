@@ -1,13 +1,8 @@
-use crate::dispatcher::Dispatcher;
 use crate::message::{Message, MessageDowncast, Response};
-use crate::types::{ActorError, BoxedAny};
-use futures::channel::mpsc;
+use crate::types::ActorError;
 use futures::future::LocalBoxFuture;
 use futures::FutureExt;
-use futures::StreamExt;
-use std::any::{Any, TypeId};
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::any::Any;
 use std::future::Future;
 pub trait AsyncMutatingFunc<'a, S, C, R, E>: Fn(&'a mut S, C) -> Self::Fut + Send + Sync
 where
@@ -178,6 +173,7 @@ pub(crate) trait AsyncMessageHandler<S>: Send + Sync {
     ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>>;
 }
 
+#[allow(unused)]
 pub(crate) trait SyncMessageHandler<S>: Send + Sync {
     fn handle_sync<'a>(
         &'a self,
@@ -391,7 +387,7 @@ mod tests {
             Ok(*s)
         }
 
-        async fn async_handler_immut(s: &u64, c: u64) -> Result<u64, ActorError> {
+        async fn async_handler_immut(s: &u64, _c: u64) -> Result<u64, ActorError> {
             Ok(*s)
         }
 
@@ -400,7 +396,7 @@ mod tests {
             Ok(*s)
         }
 
-        fn sync_handler_immut(s: &u64, c: u64) -> Result<u64, ActorError> {
+        fn sync_handler_immut(s: &u64, _c: u64) -> Result<u64, ActorError> {
             Ok(*s)
         }
 

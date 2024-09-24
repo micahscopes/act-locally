@@ -19,22 +19,27 @@ pub enum ActorMessage {
         Box<dyn Message>,
         futures::channel::oneshot::Sender<Result<Box<dyn Response>, ActorError>>,
     ),
+    // Registration(Box<dyn FnOnce(&mut A) -> Result<(), ActorError> + Send>),
 }
 
 impl Debug for ActorMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ActorMessage::Notification(key, message) => f
+            ActorMessage::Notification(key, _message) => f
                 .debug_struct("Notification")
                 .field("key", key)
                 // .field("message", message)
                 .finish(),
-            ActorMessage::Request(key, message, _) => f
+            ActorMessage::Request(key, _message, _) => f
                 .debug_struct("Request")
                 .field("key", key)
                 // .field("message", message)
                 .field("sender", &"Sender")
                 .finish(),
+            // ActorMessage::Registration(_) => f
+            //     .debug_struct("Registration")
+            //     .field("fn", &"FnOnce")
+            //     .finish(),
         }
     }
 }

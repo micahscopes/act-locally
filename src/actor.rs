@@ -1,100 +1,57 @@
 use crate::dispatcher::Dispatcher;
 use crate::handler::{
     AsyncFunc, AsyncHandler, AsyncMessageHandler, AsyncMutatingFunc, AsyncMutatingHandler,
-    SyncFunc, SyncHandler, SyncMessageHandler, SyncMutatingFunc, SyncMutatingHandler,
+    SyncFunc, SyncHandler, SyncMutatingFunc, SyncMutatingHandler,
 };
-use crate::message::{
-    ActorMessage, Message, MessageDowncast, MessageKey, Response, ResponseDowncast,
-};
+use crate::message::{ActorMessage, MessageKey, Response, ResponseDowncast};
 use crate::types::ActorError;
 use ::futures::channel::mpsc;
 // use crate::registration::HandlerRegistration;
 // use futures::channel::mpsc;
 use smol::future::{self, FutureExt};
-use smol::lock::futures;
 use smol::stream::StreamExt;
 use smol::LocalExecutor;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::error::Error;
 use std::fmt::Debug;
 use std::panic::{self, AssertUnwindSafe};
 use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 type StateRef<S> = Rc<RefCell<S>>;
+type HandlerMap<S> = Arc<RwLock<HashMap<MessageKey, Box<dyn AsyncMessageHandler<S>>>>>;
 
 pub struct Actor<S: 'static> {
     state: StateRef<S>,
-    handlers: HashMap<MessageKey, Box<dyn AsyncMessageHandler<S>>>,
+    handlers: HandlerMap<S>,
     receiver: mpsc::UnboundedReceiver<ActorMessage>,
 }
 
 impl<S: 'static> Actor<S> {
-    pub fn new(state: S) -> (Self, ActorRef) {
+    pub fn new(state: S) -> (Self, ActorRef<S>) {
+        let handlers = Arc::new(RwLock::new(HashMap::new()));
         let (sender, receiver) = mpsc::unbounded();
         (
             Self {
                 state: Rc::new(RefCell::new(state)),
-                handlers: HashMap::new(),
+                handlers: handlers.clone(),
                 receiver,
             },
-            ActorRef { sender },
+            ActorRef {
+                sender,
+                handlers: handlers.clone(),
+            },
         )
     }
 
-    pub fn register_handler_async<C, R, E, F>(&mut self, key: MessageKey, handler: F)
+    pub fn spawn<F>(init: F) -> Result<ActorRef<S>, ActorError>
     where
-        C: 'static + Send,
-        R: 'static + Send,
-        E: std::error::Error + Send + Sync + 'static,
-        F: for<'a> AsyncFunc<'a, S, C, R, E> + 'static,
-    {
-        let handler = AsyncHandler::new(handler);
-        self.handlers.insert(key, Box::new(handler));
-    }
-
-    pub fn register_handler_sync<C, R, E, F>(&mut self, key: MessageKey, handler: F)
-    where
-        C: 'static + Send,
-        R: 'static + Send,
-        E: std::error::Error + Send + Sync + 'static,
-        F: for<'a> SyncFunc<'a, S, C, R, E> + 'static,
-    {
-        let handler = SyncHandler::new(handler);
-        self.handlers.insert(key, Box::new(handler));
-    }
-
-    pub fn register_handler_async_mutating<C, R, E, F>(&mut self, key: MessageKey, handler: F)
-    where
-        C: 'static + Send,
-        R: 'static + Send,
-        E: std::error::Error + Send + Sync + 'static,
-        F: for<'a> AsyncMutatingFunc<'a, S, C, R, E> + 'static,
-    {
-        let handler = AsyncMutatingHandler::new(handler);
-        self.handlers.insert(key, Box::new(handler));
-    }
-
-    pub fn register_handler_sync_mutating<C, R, E, F>(&mut self, key: MessageKey, handler: F)
-    where
-        C: 'static + Send,
-        R: 'static + Send,
-        E: std::error::Error + Send + Sync + 'static,
-        F: for<'a> SyncMutatingFunc<'a, S, C, R, E> + 'static,
-    {
-        let handler = SyncMutatingHandler::new(handler);
-        self.handlers.insert(key, Box::new(handler));
-    }
-
-    pub fn spawn_local<F, D>(init: F) -> Result<(ActorRef, D), ActorError>
-    where
-        F: FnOnce() -> Result<(Actor<S>, ActorRef, D), ActorError>,
+        F: FnOnce() -> Result<S, ActorError>,
         F: 'static + Send,
-        D: Dispatcher + Send + 'static,
     {
-        info!("Initializing spawn_local");
+        info!("Spawning actor...");
 
         // Create a channel to communicate between threads
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -104,11 +61,12 @@ impl<S: 'static> Actor<S> {
         std::thread::spawn(move || {
             info!("Building local executor on spawned thread");
             let exec = LocalExecutor::new();
-            exec.spawn(async move {
-                info!("Spawning actor");
+            let task = exec.spawn(async move {
+                info!("Constructing actor state");
                 match init() {
-                    Ok((mut actor, actor_ref, dispatcher)) => {
-                        tx.send(Ok((actor_ref.clone(), dispatcher))).unwrap();
+                    Ok(state) => {
+                        let (mut actor, actor_ref) = Actor::new(state);
+                        tx.send(Ok(actor_ref.clone())).unwrap();
                         info!("Starting actor run loop");
                         let run_result = AssertUnwindSafe(actor.run()).catch_unwind().await;
                         if let Err(panic_info) = run_result {
@@ -121,19 +79,18 @@ impl<S: 'static> Actor<S> {
                     }
                 };
                 info!("Actor run loop finished");
-            })
-            .detach();
+            });
 
-            future::block_on(exec.run(future::pending::<()>()));
+            future::block_on(exec.run(task));
         });
 
         // Receive the ActorRef and Dispatcher from the spawned thread
         rx.recv_timeout(Duration::from_secs(2))
             .map_err(|e| ActorError::SpawnError(Box::new(e)))
             .and_then(|result| match result {
-                Ok((actor_ref, dispatcher)) => {
+                Ok(actor_ref) => {
                     info!("Received ActorRef and Dispatcher from spawned thread");
-                    Ok((actor_ref, dispatcher))
+                    Ok(actor_ref)
                 }
                 Err(e) => {
                     error!("Failed to receive ActorRef and Dispatcher: {:?}", e);
@@ -149,7 +106,8 @@ impl<S: 'static> Actor<S> {
                 info!("Actor got a new message...");
                 match message {
                     ActorMessage::Notification(key, payload) => {
-                        if let Some(handler) = self.handlers.get(&key) {
+                        let handlers = self.handlers.read().unwrap();
+                        if let Some(handler) = handlers.get(&key) {
                             info!("Handling notification with key: {key:?}");
                             let mut state = self.state.borrow_mut();
                             if let Err(e) = handler.handle(&mut *state, payload).await {
@@ -160,7 +118,8 @@ impl<S: 'static> Actor<S> {
                         }
                     }
                     ActorMessage::Request(key, payload, response_tx) => {
-                        if let Some(handler) = self.handlers.get(&key) {
+                        let handlers = self.handlers.read().unwrap();
+                        if let Some(handler) = handlers.get(&key) {
                             info!("Handling request with key: {key:?}");
                             let mut state = self.state.borrow_mut();
                             let result = handler.handle(&mut *state, payload).await;
@@ -190,12 +149,21 @@ impl<S: 'static> Actor<S> {
     }
 }
 
-#[derive(Clone)]
-pub struct ActorRef {
+pub struct ActorRef<S> {
     sender: mpsc::UnboundedSender<ActorMessage>,
+    handlers: HandlerMap<S>,
 }
 
-impl ActorRef {
+impl<S> Clone for ActorRef<S> {
+    fn clone(&self) -> Self {
+        ActorRef {
+            sender: self.sender.clone(),
+            handlers: self.handlers.clone(),
+        }
+    }
+}
+
+impl<S: 'static> ActorRef<S> {
     pub async fn ask<M: Send + 'static, R: Send + Debug + 'static, D: Dispatcher>(
         &self,
         dispatcher: &D,
@@ -211,16 +179,13 @@ impl ActorRef {
             .map_err(|_| ActorError::SendError)?;
 
         let result = response_rx.await.map_err(|_| ActorError::SendError)??;
-        // println!("Result type: {:?}", std::any::TypeId::of::<R>());
-        // let downcast = result.downcast_ref::<R>().unwrap();
-        // println!("Actual type: {:?}", downcast);
-        println!(
+        debug!(
             "in our ask handler we unwrapped the result as: {:?}",
             &result.any_response()
         );
         let unwrapped = dispatcher.unwrap(result, key.clone());
-        println!("Unwrapped type: {:?}", unwrapped.any_response().type_id());
-        println!("And unwrapped it to {:?}", &unwrapped.any_response());
+        debug!("Unwrapped type: {:?}", unwrapped.any_response().type_id());
+        debug!("And unwrapped it to {:?}", &unwrapped.any_response());
         unwrapped.and_then(|r| {
             r.downcast::<R>()
                 .map(|r| *r)
@@ -239,105 +204,72 @@ impl ActorRef {
             .unbounded_send(ActorMessage::Notification(key, wrapped))
             .map_err(|_| ActorError::SendError)
     }
+
+    pub fn register_handler_async<C, R, E, F>(&self, key: MessageKey, handler: F)
+    where
+        C: 'static + Send,
+        R: 'static + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        F: for<'a> AsyncFunc<'a, S, C, R, E> + 'static,
+    {
+        let handler = AsyncHandler::new(handler);
+        if let Ok(mut handlers) = self.handlers.write() {
+            handlers.insert(key, Box::new(handler));
+        }
+    }
+
+    pub fn register_handler_sync<C, R, E, F>(&self, key: MessageKey, handler: F)
+    where
+        C: 'static + Send,
+        R: 'static + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        F: for<'a> SyncFunc<'a, S, C, R, E> + 'static,
+    {
+        let handler = SyncHandler::new(handler);
+        if let Ok(mut handlers) = self.handlers.write() {
+            handlers.insert(key, Box::new(handler));
+        }
+    }
+
+    pub fn register_handler_async_mutating<C, R, E, F>(&self, key: MessageKey, handler: F)
+    where
+        C: 'static + Send,
+        R: 'static + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        F: for<'a> AsyncMutatingFunc<'a, S, C, R, E> + 'static,
+    {
+        let handler = AsyncMutatingHandler::new(handler);
+        if let Ok(mut handlers) = self.handlers.write() {
+            handlers.insert(key, Box::new(handler));
+        }
+    }
+
+    pub fn register_handler_sync_mutating<C, R, E, F>(&self, key: MessageKey, handler: F)
+    where
+        C: 'static + Send,
+        R: 'static + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        F: for<'a> SyncMutatingFunc<'a, S, C, R, E> + 'static,
+    {
+        let handler = SyncMutatingHandler::new(handler);
+        if let Ok(mut handlers) = self.handlers.write() {
+            handlers.insert(key, Box::new(handler));
+        }
+    }
 }
 
 pub struct HandlerRegistration<'a, S: 'static, D: Dispatcher> {
-    pub actor: &'a mut Actor<S>,
+    pub actor_ref: &'a ActorRef<S>,
     pub dispatcher: &'a mut D,
-}
-
-impl<'a, S: 'static, D: Dispatcher> HandlerRegistration<'a, S, D> {
-    pub fn register_handler_async<C, R, E, F>(&mut self, key: MessageKey, handler: F)
-    where
-        C: 'static + Send + Clone,
-        R: 'static + Send,
-        E: std::error::Error + Send + Sync + 'static,
-        F: for<'b> AsyncFunc<'b, S, C, R, E> + 'static,
-    {
-        // self.dispatcher.register_wrapper(
-        //     key.clone(),
-        //     Box::new(move |msg| {
-        //         wrapper(
-        //             msg.downcast_ref::<C>()
-        //                 .expect("Type mismatch in wrapper")
-        //                 .clone(),
-        //         )
-        //     }),
-        // );
-        self.actor.register_handler_async(key, handler);
-    }
-
-    pub fn register_handler_sync<C, R, E, F>(&mut self, key: MessageKey, handler: F)
-    where
-        C: 'static + Send + Clone,
-        R: 'static + Send,
-        E: std::error::Error + Send + Sync + 'static,
-        F: for<'b> SyncFunc<'b, S, C, R, E> + 'static,
-    {
-        // self.dispatcher.register_wrapper(
-        //     key.clone(),
-        //     Box::new(move |msg| {
-        //         wrapper(
-        //             msg.downcast_ref::<C>()
-        //                 .expect("Type mismatch in wrapper")
-        //                 .clone(),
-        //         )
-        //     }),
-        // );
-        self.actor.register_handler_sync(key, handler);
-    }
-
-    pub fn register_handler_async_mutating<C, R, E, F>(&mut self, key: MessageKey, handler: F)
-    where
-        C: 'static + Send + Clone,
-        R: 'static + Send,
-        E: std::error::Error + Send + Sync + 'static,
-        F: for<'b> AsyncMutatingFunc<'b, S, C, R, E> + 'static,
-    {
-        // self.dispatcher.register_wrapper(
-        //     key.clone(),
-        //     Box::new(move |msg| {
-        //         wrapper(
-        //             msg.downcast_ref::<C>()
-        //                 .expect("Type mismatch in wrapper")
-        //                 .clone(),
-        //         )
-        //     }),
-        // );
-        self.actor.register_handler_async_mutating(key, handler);
-    }
-
-    pub fn register_handler_sync_mutating<C, R, E, F>(&mut self, key: MessageKey, handler: F)
-    where
-        C: 'static + Send + Clone,
-        R: 'static + Send,
-        E: std::error::Error + Send + Sync + 'static,
-        F: for<'b> SyncMutatingFunc<'b, S, C, R, E> + 'static,
-    {
-        // self.dispatcher.register_wrapper(
-        //     key.clone(),
-        //     Box::new(move |msg| {
-        //         wrapper(
-        //             msg.downcast_ref::<C>()
-        //                 .expect("Type mismatch in wrapper")
-        //                 .clone(),
-        //         )
-        //     }),
-        // );
-        self.actor.register_handler_sync_mutating(key, handler);
-    }
 }
 
 // Tests
 #[cfg(test)]
 mod tests {
-    use crate::message::Response;
+    use crate::message::{Message, MessageDowncast, Response};
 
     use super::*;
-    use std::{
-        sync::atomic::{AtomicUsize, Ordering},
-        thread::sleep,
-    };
+    use std::{borrow::BorrowMut, thread::sleep};
 
     #[derive(Clone)]
     struct TestState {
@@ -380,7 +312,7 @@ mod tests {
             message: Box<dyn Message>,
             _key: MessageKey,
         ) -> Result<Box<dyn Message>, ActorError> {
-            println!("Wrapping message of type: {:?}", message.type_id());
+            debug!("Wrapping message of type: {:?}", message.type_id());
             Ok(message)
         }
 
@@ -389,17 +321,29 @@ mod tests {
             message: Box<dyn Response>,
             _key: MessageKey,
         ) -> Result<Box<dyn Response>, ActorError> {
-            println!("Unwrapping message of type: {:?}", message.type_id());
+            debug!("Unwrapping message of type: {:?}", message.type_id());
             Ok(message)
         }
+    }
 
-        // fn register_wrapper(
-        //     &mut self,
-        //     _key: MessageKey,
-        //     _wrapper: Box<dyn Fn(Box<dyn Message>) -> Box<dyn Message> + Send + Sync>,
-        // ) {
-        //     // In this simple implementation, we don't need to do anything
-        // }
+    impl<'a> HandlerRegistration<'a, TestState, TestDispatcher> {
+        fn register_handlers(&mut self) {
+            let actor_ref = &mut self.actor_ref.borrow_mut();
+            // let dispatcher = &self.dispatcher;
+            actor_ref
+                .register_handler_async_mutating(MessageKey::new("increment"), increment_handler);
+
+            actor_ref.register_handler_async_mutating(MessageKey::new("append"), append_handler);
+
+            actor_ref.register_handler_async_mutating(
+                MessageKey::new("get_counter"),
+                get_counter_handler,
+            );
+            actor_ref.register_handler_async_mutating(
+                MessageKey::new("get_messages"),
+                get_messages_handler,
+            );
+        }
     }
 
     async fn increment_handler(
@@ -429,46 +373,22 @@ mod tests {
         Ok(state.messages.clone())
     }
 
-    async fn test_actor_with_custom_dispatcher() {
-        let (actor_ref, dispatcher) = Actor::spawn_local(|| {
-            let mut dispatcher = TestDispatcher;
-            let (mut actor, actor_ref) = Actor::new(TestState {
+    #[test]
+    fn test_actor_with_custom_dispatcher() {
+        let mut dispatcher = TestDispatcher;
+        let actor_ref = Actor::spawn(|| {
+            Ok(TestState {
                 counter: 0,
                 messages: Vec::new(),
-            });
-
-            let mut registration = HandlerRegistration {
-                actor: &mut actor,
-                dispatcher: &mut dispatcher,
-            };
-
-            registration.register_handler_async_mutating(
-                MessageKey::new("increment"),
-                // |msg: IncrementMessage| Box::new(msg) as Box<dyn Message>,
-                increment_handler,
-            );
-
-            registration.register_handler_async_mutating(
-                MessageKey::new("append"),
-                // |msg: AppendMessage| Box::new(msg) as Box<dyn Message>,
-                append_handler,
-            );
-
-            registration.register_handler_async_mutating(
-                MessageKey::new("get_counter"),
-                // |msg: GetCounterMessage| Box::new(msg) as Box<dyn Message>,
-                get_counter_handler,
-            );
-
-            registration.register_handler_async_mutating(
-                MessageKey::new("get_messages"),
-                // |msg: GetMessagesMessage| Box::new(msg) as Box<dyn Message>,
-                get_messages_handler,
-            );
-
-            Ok((actor, actor_ref, dispatcher))
+            })
         })
         .expect("Failed to spawn actor");
+
+        HandlerRegistration {
+            actor_ref: &mut actor_ref.clone(),
+            dispatcher: &mut dispatcher,
+        }
+        .register_handlers();
 
         // Test increment
         actor_ref
@@ -490,21 +410,24 @@ mod tests {
         sleep(Duration::from_millis(100));
 
         // Test get_counter
-        let counter: i32 = actor_ref
-            .ask(&dispatcher, GetCounterMessage)
-            .await
-            .unwrap_or_else(|e| {
-                println!("Error getting counter: {:?}", e);
-                panic!("Failed to get counter: {:?}", e);
-            });
-        assert_eq!(counter, 8);
+        future::block_on(async move {
+            let counter: i32 = actor_ref
+                .ask(&dispatcher, GetCounterMessage)
+                .await
+                .unwrap_or_else(|e| {
+                    println!("Error getting counter: {:?}", e);
+                    panic!("Failed to get counter: {:?}", e);
+                });
+            assert_eq!(counter, 8);
 
-        // Test get_messages
-        let messages: Vec<String> = actor_ref
-            .ask(&dispatcher, GetMessagesMessage)
-            .await
-            .expect("Failed to get messages");
-        assert_eq!(messages, vec!["Hello".to_string(), "World".to_string()]);
+            let messages: Vec<String> = actor_ref
+                .ask(&dispatcher, GetMessagesMessage)
+                .await
+                .expect("Failed to get messages");
+            assert_eq!(messages, vec!["Hello".to_string(), "World".to_string()]);
+        });
+
+        // future::block_on(task);
 
         println!("All tests passed successfully!");
     }
