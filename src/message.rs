@@ -19,7 +19,6 @@ pub enum ActorMessage {
         Box<dyn Message>,
         futures::channel::oneshot::Sender<Result<Box<dyn Response>, ActorError>>,
     ),
-    // Registration(Box<dyn FnOnce(&mut A) -> Result<(), ActorError> + Send>),
 }
 
 impl Debug for ActorMessage {
@@ -36,10 +35,6 @@ impl Debug for ActorMessage {
                 // .field("message", message)
                 .field("sender", &"Sender")
                 .finish(),
-            // ActorMessage::Registration(_) => f
-            //     .debug_struct("Registration")
-            //     .field("fn", &"FnOnce")
-            //     .finish(),
         }
     }
 }
@@ -123,77 +118,12 @@ impl BoxedMessage {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
+#[cfg(test)]
+mod tests {
+    // use super::*;
 
-//     #[derive(Debug, PartialEq)]
-//     struct TestMessage {
-//         content: String,
-//     }
-
-//     #[test]
-//     fn test_boxed_message_downcast() {
-//         let original = TestMessage {
-//             content: "Hello, world!".to_string(),
-//         };
-//         let boxed = BoxedMessage::new(original);
-
-//         if let Some(downcasted) = boxed.downcast_ref::<TestMessage>() {
-//             assert_eq!(downcasted.content, "Hello, world!");
-//         } else {
-//             panic!("Failed to downcast BoxedMessage");
-//         }
-//     }
-
-//     #[test]
-//     fn test_boxed_message_failed_downcast() {
-//         let original = TestMessage {
-//             content: "Hello, world!".to_string(),
-//         };
-//         let boxed = BoxedMessage::new(original);
-
-//         assert!(boxed.downcast_ref::<String>().is_none());
-//     }
-
-//     #[test]
-//     fn test_message_trait_downcast() {
-//         let message = TestMessage {
-//             content: "Test content".to_string(),
-//         };
-//         let message_ref: &dyn Message = &message;
-
-//         if let Some(downcasted) = MessageDowncast::downcast_ref::<TestMessage>(message_ref) {
-//             assert_eq!(downcasted.content, "Test content");
-//         } else {
-//             panic!("Failed to downcast Message trait object");
-//         }
-//     }
-
-//     #[test]
-//     fn test_message_key() {
-//         let key = MessageKey::new("test_key");
-//         assert_eq!(key.0, "test_key");
-//     }
-
-//     #[test]
-//     fn test_actor_message_notification() {
-//         let key = MessageKey::new("notification");
-//         let message = BoxedMessage::new(TestMessage {
-//             content: "Notification content".to_string(),
-//         });
-//         let actor_message = ActorMessage::Notification(key, message);
-
-//         match actor_message {
-//             ActorMessage::Notification(k, m) => {
-//                 assert_eq!(k.0, "notification");
-//                 if let Some(test_message) = m.downcast_ref::<TestMessage>() {
-//                     assert_eq!(test_message.content, "Notification content");
-//                 } else {
-//                     panic!("Failed to downcast notification message");
-//                 }
-//             }
-//             _ => panic!("Expected Notification variant"),
-//         }
-//     }
-// }
+    // #[derive(Debug, PartialEq)]
+    // struct TestMessage {
+    //     content: String,
+    // }
+}
