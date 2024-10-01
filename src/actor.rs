@@ -1,3 +1,4 @@
+use crate::builder::ActorBuilder;
 use crate::dispatcher::Dispatcher;
 use crate::handler::{
     AsyncFunc, AsyncHandler, AsyncMessageHandler, AsyncMutatingFunc, AsyncMutatingHandler,
@@ -19,8 +20,7 @@ use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::instrument::WithSubscriber;
-use tracing::subscriber::{set_default, DefaultGuard};
-use tracing::{debug, error, info, info_span, span, Instrument, Level, Span, Subscriber};
+use tracing::{debug, error, info, info_span, span, Instrument, Level};
 
 type StateRef<S> = Rc<RefCell<S>>;
 type HandlerMap<S> = Arc<RwLock<HashMap<MessageKey, Box<dyn AsyncMessageHandler<S>>>>>;
@@ -47,84 +47,65 @@ impl<S: 'static> Actor<S> {
             },
         )
     }
-    pub fn spawn<F>(init_state: F) -> Result<ActorRef<S>, ActorError>
-    where
-        F: FnOnce() -> Result<S, ActorError>,
-        F: 'static + Send,
-    {
-        Self::setup_spawn_with_subscriber(init_state, || None)
-    }
 
-    pub fn spawn_with_tracing<F, T>(
-        init_state: F,
-        init_subscriber: T,
-    ) -> Result<ActorRef<S>, ActorError>
-    where
-        F: FnOnce() -> Result<S, ActorError>,
-        F: 'static + Send,
-        T: FnOnce() -> Option<DefaultGuard>,
-        T: 'static + Send,
-    {
-        Self::setup_spawn_with_subscriber(init_state, init_subscriber)
-    }
+    pub(crate) fn spawn_builder(builder: ActorBuilder<S>) -> Result<ActorRef<S>, ActorError> {
+        let init_state = builder
+            .init_state
+            .ok_or_else(|| ActorError::SpawnError("init_state function must be provided".into()))?;
+        let init_subscriber = builder.init_subscriber.unwrap_or_else(|| Box::new(|| None));
+        let name = builder.name.unwrap_or("actor".into());
 
-    fn setup_spawn_with_subscriber<F, T>(
-        init_state: F,
-        init_subscriber: T,
-    ) -> Result<ActorRef<S>, ActorError>
-    where
-        F: FnOnce() -> Result<S, ActorError>,
-        F: 'static + Send,
-        T: FnOnce() -> Option<DefaultGuard>,
-        T: 'static + Send,
-    {
         info!("Spawning actor...");
 
         // Create a channel to communicate between threads
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let actor_parent_span = tracing::info_span!("actor", y = 22);
-        let actor_thread_span = span!(parent: &actor_parent_span, Level::INFO, "actor", x = 32);
+        let actor_parent_span = tracing::info_span!("actor");
+        let actor_thread_span = span!(parent: &actor_parent_span, Level::INFO, "actor");
         let actor_parent_span = actor_parent_span.entered();
         // .child_of(&actor_parent_span);
 
         // Spawn a new thread for the actor
         info!("Spawning new thread for actor");
-        std::thread::spawn(move || {
-            {
-                let tracing_hook = init_subscriber();
-                info!("Building local executor on spawned thread");
-                let exec = LocalExecutor::new();
-                let actor_task_span = info_span!("actor task", z = 44);
-                let task = exec.spawn(
-                    async move {
-                        // let actor_task_span = actor_task_span.enter();
-                        info!("Constructing actor state");
-                        match init_state() {
-                            Ok(state) => {
-                                let (mut actor, actor_ref) = Actor::new(state);
-                                tx.send(Ok(actor_ref.clone())).unwrap();
-                                info!("Starting actor run loop");
-                                let run_result = AssertUnwindSafe(actor.run()).catch_unwind().await;
-                                if let Err(panic_info) = run_result {
-                                    error!("Actor run loop panicked: {:?}", panic_info);
+        std::thread::Builder::new()
+            .name(name.clone())
+            .spawn(move || {
+                {
+                    let tracing_hook = init_subscriber();
+                    info!("Building local executor on spawned thread");
+                    let exec = LocalExecutor::new();
+                    let actor_task_span = info_span!("actor task");
+                    let task = exec.spawn(
+                        async move {
+                            // let actor_task_span = actor_task_span.enter();
+                            info!("Constructing actor state");
+                            match init_state() {
+                                Ok(state) => {
+                                    let (mut actor, actor_ref) = Actor::new(state);
+                                    tx.send(Ok(actor_ref.clone())).unwrap();
+                                    info!("Starting actor run loop");
+                                    let run_result =
+                                        AssertUnwindSafe(actor.run()).catch_unwind().await;
+                                    if let Err(panic_info) = run_result {
+                                        error!("Actor run loop panicked: {:?}", panic_info);
+                                    }
                                 }
-                            }
-                            Err(e) => {
-                                error!("Uh oh... Spawn error: {e:?}");
-                                tx.send(Err(e)).unwrap();
-                            }
-                        };
-                        info!("Actor run loop finished");
-                        // drop(actor_task_span);
-                    }
-                    .instrument(actor_task_span),
-                );
+                                Err(e) => {
+                                    error!("Uh oh... Spawn error: {e:?}");
+                                    tx.send(Err(e)).unwrap();
+                                }
+                            };
+                            info!("Actor run loop finished");
+                            // drop(actor_task_span);
+                        }
+                        .instrument(actor_task_span),
+                    );
 
-                future::block_on(exec.run(task).with_current_subscriber());
-                drop(tracing_hook);
-            }
-            .instrument(actor_thread_span)
-        });
+                    future::block_on(exec.run(task).with_current_subscriber());
+                    drop(tracing_hook);
+                }
+                .instrument(actor_thread_span)
+            })
+            .expect("Failed to spawn actor thread");
 
         drop(actor_parent_span);
         // Receive the ActorRef and Dispatcher from the spawned thread
@@ -419,13 +400,15 @@ mod tests {
     #[test]
     fn test_actor_with_custom_dispatcher() {
         let mut dispatcher = TestDispatcher;
-        let actor_ref = Actor::spawn(|| {
-            Ok(TestState {
-                counter: 0,
-                messages: Vec::new(),
+        let actor_ref = ActorBuilder::new()
+            .with_state_init(|| {
+                Ok(TestState {
+                    counter: 0,
+                    messages: Vec::new(),
+                })
             })
-        })
-        .expect("Failed to spawn actor");
+            .spawn()
+            .expect("Failed to spawn actor");
 
         HandlerRegistration {
             actor_ref: &mut actor_ref.clone(),
