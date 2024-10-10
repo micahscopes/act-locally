@@ -1,3 +1,5 @@
+use std::{fmt::Debug, hash::Hash};
+
 use tracing::subscriber::DefaultGuard;
 
 use crate::{
@@ -5,15 +7,17 @@ use crate::{
     types::ActorError,
 };
 
-pub struct ActorBuilder<S> {
+pub struct ActorBuilder<S, K> {
     pub(crate) init_state: Option<Box<dyn FnOnce() -> Result<S, ActorError> + Send + 'static>>,
     pub(crate) init_subscriber: Option<Box<dyn FnOnce() -> Option<DefaultGuard> + Send + 'static>>,
     pub(crate) name: Option<String>,
+    phantom: std::marker::PhantomData<K>,
 }
 
-impl<S> ActorBuilder<S>
+impl<S, K> ActorBuilder<S, K>
 where
     S: 'static,
+    K: Eq + Hash + Debug + Clone + Send + Sync + 'static,
 {
     /// Creates a new `ActorBuilder` instance.
     pub fn new() -> Self {
@@ -21,6 +25,7 @@ where
             init_state: None,
             init_subscriber: None,
             name: None,
+            phantom: std::marker::PhantomData::<K>,
         }
     }
 
@@ -49,7 +54,7 @@ where
     }
 
     /// Spawns the actor with the configured settings.
-    pub fn spawn(self) -> Result<ActorRef<S>, ActorError> {
+    pub fn spawn(self) -> Result<ActorRef<S, K>, ActorError> {
         Actor::spawn_builder(self)
     }
 }

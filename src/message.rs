@@ -1,27 +1,47 @@
-use std::any::Any;
 use std::fmt::Debug;
+use std::{any::Any, hash::Hash};
 
 use crate::types::{ActorError, BoxedAny};
 
-#[derive(Clone, Hash, Eq, PartialEq, Debug)]
-pub struct MessageKey(pub String);
+// #[derive(Clone, Hash, Eq, PartialEq, Debug)]
+// pub struct MessageKey(pub String);
 
-impl MessageKey {
-    pub fn new(key: &str) -> Self {
-        MessageKey(key.to_string())
+// impl MessageKey {
+//     pub fn new(key: &str) -> Self {
+//         MessageKey(key.to_string())
+//     }
+// }
+
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
+pub struct MessageKey<K>(pub K)
+where
+    K: Eq + Hash + Debug;
+
+impl<K> MessageKey<K>
+where
+    K: Eq + Hash + Debug,
+{
+    pub fn new(key: K) -> Self {
+        MessageKey(key)
     }
 }
 
-pub enum ActorMessage {
-    Notification(MessageKey, Box<dyn Message>),
+pub enum ActorMessage<K>
+where
+    K: Eq + Hash + Debug,
+{
+    Notification(MessageKey<K>, Box<dyn Message>),
     Request(
-        MessageKey,
+        MessageKey<K>,
         Box<dyn Message>,
         futures::channel::oneshot::Sender<Result<Box<dyn Response>, ActorError>>,
     ),
 }
 
-impl Debug for ActorMessage {
+impl<K> Debug for ActorMessage<K>
+where
+    K: Eq + Hash + Debug,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ActorMessage::Notification(key, _message) => f

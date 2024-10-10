@@ -2,21 +2,21 @@ use crate::{
     message::{Message, MessageKey, Response},
     types::ActorError,
 };
-use std::any::TypeId;
+use std::{any::TypeId, fmt::Debug, hash::Hash};
 
-pub trait Dispatcher: Send + Sync + 'static {
-    fn message_key(&self, message: &dyn Message) -> Result<MessageKey, ActorError>;
+pub trait Dispatcher<K: Eq + Hash + Debug>: Send + Sync + 'static {
+    fn message_key(&self, message: &dyn Message) -> Result<MessageKey<K>, ActorError>;
 
     fn wrap(
         &self,
         message: Box<dyn Message>,
-        key: MessageKey,
+        key: MessageKey<K>,
     ) -> Result<Box<dyn Message>, ActorError>;
 
     fn unwrap(
         &self,
         message: Box<dyn Response>,
-        key: MessageKey,
+        key: MessageKey<K>,
     ) -> Result<Box<dyn Response>, ActorError>;
 }
 
@@ -28,15 +28,15 @@ impl GenericDispatcher {
     }
 }
 
-impl Dispatcher for GenericDispatcher {
-    fn message_key(&self, message: &dyn Message) -> Result<MessageKey, ActorError> {
-        Ok(MessageKey(format!("{:?}", message.type_id())))
+impl Dispatcher<TypeId> for GenericDispatcher {
+    fn message_key(&self, message: &dyn Message) -> Result<MessageKey<TypeId>, ActorError> {
+        Ok(MessageKey(message.type_id()))
     }
 
     fn wrap(
         &self,
         message: Box<dyn Message>,
-        _key: MessageKey,
+        _key: MessageKey<TypeId>,
     ) -> Result<Box<dyn Message>, ActorError> {
         Ok(message)
     }
@@ -44,7 +44,7 @@ impl Dispatcher for GenericDispatcher {
     fn unwrap(
         &self,
         response: Box<dyn Response>,
-        _key: MessageKey,
+        _key: MessageKey<TypeId>,
     ) -> Result<Box<dyn Response>, ActorError> {
         Ok(response)
     }
@@ -95,8 +95,8 @@ mod tests {
         assert_ne!(key1, key2);
 
         // Ensure keys match expected values
-        let expected_key1 = MessageKey(format!("{:?}", TypeId::of::<IncrementMessage>()));
-        let expected_key2 = MessageKey(format!("{:?}", TypeId::of::<GetCounterMessage>()));
+        let expected_key1 = MessageKey(TypeId::of::<IncrementMessage>());
+        let expected_key2 = MessageKey(TypeId::of::<GetCounterMessage>());
 
         assert_eq!(key1, expected_key1);
         assert_eq!(key2, expected_key2);
@@ -144,11 +144,11 @@ mod tests {
 
         // Register handlers with the actor
         actor.register_handler_async_mutating(
-            MessageKey(format!("{:?}", TypeId::of::<IncrementMessage>())),
+            MessageKey(TypeId::of::<IncrementMessage>()),
             increment_handler,
         );
         actor.register_handler_async_mutating(
-            MessageKey(format!("{:?}", TypeId::of::<GetCounterMessage>())),
+            MessageKey(TypeId::of::<GetCounterMessage>()),
             get_counter_handler,
         );
 

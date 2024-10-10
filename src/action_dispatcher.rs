@@ -1,4 +1,8 @@
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt::{self, Debug},
+    hash::Hash,
+};
 
 use crate::{
     actor::ActorRef,
@@ -8,9 +12,12 @@ use crate::{
 };
 
 #[allow(unused)]
-pub struct ActionDispatcher<S> {
-    key: MessageKey,
-    actor: ActorRef<S>,
+pub struct ActionDispatcher<S, K>
+where
+    K: Eq + Hash + Debug + Clone,
+{
+    key: MessageKey<K>,
+    actor: ActorRef<S, K>,
 }
 pub struct ActionError(pub Box<dyn Error + Send + Sync>);
 impl fmt::Debug for ActionError {
@@ -20,7 +27,7 @@ impl fmt::Debug for ActionError {
 }
 impl fmt::Display for ActionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        write!(f, "{}", self.0)
     }
 }
 impl Error for ActionError {}
@@ -28,9 +35,9 @@ impl Error for ActionError {}
 pub type ActionFunc<S> = Box<dyn FnOnce(&mut S) -> Result<(), ActionError> + Send>;
 
 #[allow(unused)]
-impl<S: 'static> ActionDispatcher<S> {
+impl<S: 'static, K: Eq + Hash + Debug + Clone + Send + Sync + 'static> ActionDispatcher<S, K> {
     // Register a new dispatcher with the actor
-    pub fn register(key: MessageKey, actor: ActorRef<S>) -> Self {
+    pub fn register(key: MessageKey<K>, actor: ActorRef<S, K>) -> Self {
         let handler = move |state: &mut S, func: ActionFunc<S>| func(state);
         // Register the handler with the actor
         actor.register_handler_sync_mutating::<ActionFunc<S>, (), ActionError, _>(
@@ -46,8 +53,10 @@ impl<S: 'static> ActionDispatcher<S> {
     }
 }
 
-impl<S: 'static> Dispatcher for ActionDispatcher<S> {
-    fn message_key(&self, message: &dyn Message) -> Result<MessageKey, ActorError> {
+impl<S: 'static, K: Eq + Hash + Debug + Clone + Send + Sync + 'static> Dispatcher<K>
+    for ActionDispatcher<S, K>
+{
+    fn message_key(&self, message: &dyn Message) -> Result<MessageKey<K>, ActorError> {
         if message.downcast_ref::<ActionFunc<S>>().is_some() {
             Ok(self.key.clone())
         } else {
@@ -58,7 +67,7 @@ impl<S: 'static> Dispatcher for ActionDispatcher<S> {
     fn wrap(
         &self,
         message: Box<dyn Message>,
-        key: MessageKey,
+        key: MessageKey<K>,
     ) -> Result<Box<dyn Message>, ActorError> {
         if key == self.key {
             Ok(message)
@@ -70,7 +79,7 @@ impl<S: 'static> Dispatcher for ActionDispatcher<S> {
     fn unwrap(
         &self,
         message: Box<dyn Response>,
-        key: MessageKey,
+        key: MessageKey<K>,
     ) -> Result<Box<dyn Response>, ActorError> {
         if key == self.key {
             Ok(message)
@@ -102,8 +111,7 @@ mod tests {
             .expect("Failed to spawn actor");
 
         // Register the ActionDispatcher with the actor
-        let action_dispatcher =
-            ActionDispatcher::register(MessageKey::new("action"), actor_ref.clone());
+        let action_dispatcher = ActionDispatcher::register(MessageKey("action"), actor_ref.clone());
 
         // Define some actions
         let increment_by_5: ActionFunc<TestState> = Box::new(|state| {
