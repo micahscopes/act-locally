@@ -9,7 +9,7 @@ use crate::types::ActorError;
 use ::futures::channel::mpsc;
 // use crate::registration::HandlerRegistration;
 // use futures::channel::mpsc;
-use smol::future::{self, FutureExt};
+use smol::future::{self, yield_now, FutureExt};
 use smol::stream::StreamExt;
 use smol::LocalExecutor;
 use std::cell::RefCell;
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::panic::{self, AssertUnwindSafe};
 use std::rc::Rc;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tracing::instrument::WithSubscriber;
 use tracing::{debug, error, info, info_span, span, Instrument, Level};
@@ -29,10 +29,11 @@ pub struct Actor<S: 'static> {
     state: StateRef<S>,
     handlers: HandlerMap<S>,
     receiver: mpsc::UnboundedReceiver<ActorMessage>,
+    executor: Arc<Mutex<LocalExecutor<'static>>>,
 }
 
 impl<S: 'static> Actor<S> {
-    pub fn new(state: S) -> (Self, ActorRef<S>) {
+    pub fn new(state: S, executor: Arc<Mutex<LocalExecutor<'static>>>) -> (Self, ActorRef<S>) {
         let handlers = Arc::new(RwLock::new(HashMap::new()));
         let (sender, receiver) = mpsc::unbounded();
         (
@@ -40,6 +41,7 @@ impl<S: 'static> Actor<S> {
                 state: Rc::new(RefCell::new(state)),
                 handlers: handlers.clone(),
                 receiver,
+                executor,
             },
             ActorRef {
                 sender,
@@ -59,7 +61,7 @@ impl<S: 'static> Actor<S> {
 
         // Create a channel to communicate between threads
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let actor_parent_span = tracing::info_span!("actor");
+        let actor_parent_span = tracing::info_span!("actor root");
         let actor_thread_span = span!(parent: &actor_parent_span, Level::INFO, "actor");
         let actor_parent_span = actor_parent_span.entered();
         // .child_of(&actor_parent_span);
@@ -72,34 +74,32 @@ impl<S: 'static> Actor<S> {
                 {
                     let tracing_hook = init_subscriber();
                     info!("Building local executor on spawned thread");
-                    let exec = LocalExecutor::new();
+                    let exec = Arc::new(Mutex::new(LocalExecutor::new()));
+                    let exec_for_actor = exec.clone();
                     let actor_task_span = info_span!("actor task");
-                    let task = exec.spawn(
-                        async move {
-                            // let actor_task_span = actor_task_span.enter();
-                            info!("Constructing actor state");
-                            match init_state() {
-                                Ok(state) => {
-                                    let (mut actor, actor_ref) = Actor::new(state);
-                                    tx.send(Ok(actor_ref.clone())).unwrap();
-                                    info!("Starting actor run loop");
-                                    let run_result =
-                                        AssertUnwindSafe(actor.run()).catch_unwind().await;
-                                    if let Err(panic_info) = run_result {
-                                        error!("Actor run loop panicked: {:?}", panic_info);
-                                    }
+                    let task = async move {
+                        // let actor_task_span = actor_task_span.enter();
+                        info!("Constructing actor state");
+                        match init_state() {
+                            Ok(state) => {
+                                let (mut actor, actor_ref) = Actor::new(state, exec_for_actor);
+                                tx.send(Ok(actor_ref.clone())).unwrap();
+                                info!("Starting actor run loop");
+                                let run_result = AssertUnwindSafe(actor.run()).catch_unwind().await;
+                                if let Err(panic_info) = run_result {
+                                    error!("Actor run loop panicked: {:?}", panic_info);
                                 }
-                                Err(e) => {
-                                    error!("Uh oh... Spawn error: {e:?}");
-                                    tx.send(Err(e)).unwrap();
-                                }
-                            };
-                            info!("Actor run loop finished");
-                            // drop(actor_task_span);
-                        }
-                        .instrument(actor_task_span),
-                    );
-
+                            }
+                            Err(e) => {
+                                error!("Uh oh... Spawn error: {e:?}");
+                                tx.send(Err(e)).unwrap();
+                            }
+                        };
+                        info!("Actor run loop finished");
+                        // drop(actor_task_span);
+                    }
+                    .instrument(actor_task_span);
+                    let exec = exec.lock().unwrap();
                     future::block_on(exec.run(task).with_current_subscriber());
                     drop(tracing_hook);
                 }
@@ -154,6 +154,7 @@ impl<S: 'static> Actor<S> {
                         }
                     }
                 }
+                yield_now().await;
             }
             info!("Actor run loop finished");
         })
@@ -350,20 +351,17 @@ mod tests {
         }
     }
 
-    impl<'a> HandlerRegistration<'a, TestState, TestDispatcher> {
+    impl ActorRef<TestState> {
         fn register_handlers(&mut self) {
-            let actor_ref = &mut self.actor_ref.borrow_mut();
-            // let dispatcher = &self.dispatcher;
-            actor_ref
-                .register_handler_async_mutating(MessageKey::new("increment"), increment_handler);
+            self.register_handler_async_mutating(MessageKey::new("increment"), increment_handler);
 
-            actor_ref.register_handler_async_mutating(MessageKey::new("append"), append_handler);
+            self.register_handler_async_mutating(MessageKey::new("append"), append_handler);
 
-            actor_ref.register_handler_async_mutating(
+            self.register_handler_async_mutating(
                 MessageKey::new("get_counter"),
                 get_counter_handler,
             );
-            actor_ref.register_handler_async_mutating(
+            self.register_handler_async_mutating(
                 MessageKey::new("get_messages"),
                 get_messages_handler,
             );
@@ -399,8 +397,8 @@ mod tests {
 
     #[test]
     fn test_actor_with_custom_dispatcher() {
-        let mut dispatcher = TestDispatcher;
-        let actor_ref = ActorBuilder::new()
+        let dispatcher = TestDispatcher;
+        let mut actor_ref = ActorBuilder::new()
             .with_state_init(|| {
                 Ok(TestState {
                     counter: 0,
@@ -410,11 +408,7 @@ mod tests {
             .spawn()
             .expect("Failed to spawn actor");
 
-        HandlerRegistration {
-            actor_ref: &mut actor_ref.clone(),
-            dispatcher: &mut dispatcher,
-        }
-        .register_handlers();
+        actor_ref.register_handlers();
 
         // Test increment
         actor_ref
