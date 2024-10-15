@@ -130,8 +130,7 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
                         let handlers = self.handlers.read().unwrap();
                         if let Some(handler) = handlers.get(&key) {
                             info!("Handling notification with key: {key:?}");
-                            let mut state = self.state.borrow_mut();
-                            if let Err(e) = handler.handle(&mut *state, payload).await {
+                            if let Err(e) = handler.handle(self.state.clone(), payload).await {
                                 info!("Handler error: {e:?}");
                             }
                         } else {
@@ -142,8 +141,7 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
                         let handlers = self.handlers.read().unwrap();
                         if let Some(handler) = handlers.get(&key) {
                             info!("Handling request with key: {key:?}");
-                            let mut state = self.state.borrow_mut();
-                            let result = handler.handle(&mut *state, payload).await;
+                            let result = handler.handle(self.state.clone(), payload).await;
                             let _ = response_tx.send(result);
                         } else {
                             error!("No handler found for key: {:?}", key);
