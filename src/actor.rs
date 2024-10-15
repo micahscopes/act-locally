@@ -7,23 +7,19 @@ use crate::handler::{
 use crate::message::{ActorMessage, MessageKey, Response, ResponseDowncast};
 use crate::types::ActorError;
 use ::futures::channel::mpsc;
-// use crate::registration::HandlerRegistration;
-// use futures::channel::mpsc;
-use smol::future::{self, yield_now, FutureExt};
+use smol::future::{self, FutureExt};
 use smol::stream::StreamExt;
 use smol::LocalExecutor;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::panic::{self, AssertUnwindSafe};
-use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::instrument::WithSubscriber;
 use tracing::{debug, error, info, info_span, span, Instrument, Level};
 
-type StateRef<S> = Rc<RefCell<S>>;
+type StateRef<S> = Arc<smol::lock::RwLock<S>>;
 type HandlerMap<S, K> = Arc<RwLock<HashMap<MessageKey<K>, Box<dyn AsyncMessageHandler<S>>>>>;
 
 pub struct Actor<S: 'static, K: Eq + Hash + Debug> {
@@ -38,7 +34,7 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
         let (sender, receiver) = mpsc::unbounded();
         (
             Self {
-                state: Rc::new(RefCell::new(state)),
+                state: Arc::new(smol::lock::RwLock::new(state)),
                 handlers: handlers.clone(),
                 receiver,
             },
@@ -63,7 +59,6 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
         let actor_parent_span = tracing::info_span!("actor root");
         let actor_thread_span = span!(parent: &actor_parent_span, Level::INFO, "actor");
         let actor_parent_span = actor_parent_span.entered();
-        // .child_of(&actor_parent_span);
 
         // Spawn a new thread for the actor
         info!("Spawning new thread for actor");
@@ -94,7 +89,6 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
                             }
                         };
                         info!("Actor run loop finished");
-                        // drop(actor_task_span);
                     }
                     .instrument(actor_task_span);
                     future::block_on(exec.run(task).with_current_subscriber());
@@ -149,7 +143,7 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
                         }
                     }
                 }
-                yield_now().await;
+                // smol::future::yield_now().await;
             }
             info!("Actor run loop finished");
         })

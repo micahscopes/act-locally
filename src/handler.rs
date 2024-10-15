@@ -3,9 +3,12 @@ use crate::types::ActorError;
 use futures::future::LocalBoxFuture;
 use futures::FutureExt;
 use std::any::Any;
-use std::cell::RefCell;
+// use std::cell::RefCell;
+// use std::rc::Rc;
 use std::future::Future;
-use std::rc::Rc;
+
+use smol::lock::RwLock;
+use std::sync::Arc;
 
 pub trait AsyncMutatingFunc<'a, S, C, R, E>: Fn(&'a mut S, C) -> Self::Fut + Send + Sync
 where
@@ -171,7 +174,7 @@ impl<S: 'static, C: 'static, R: 'static> SyncHandler<S, C, R> {
 pub(crate) trait AsyncMessageHandler<S>: Send + Sync {
     fn handle<'a>(
         &'a self,
-        state: Rc<RefCell<S>>,
+        state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
     ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>>;
 }
@@ -180,7 +183,7 @@ pub(crate) trait AsyncMessageHandler<S>: Send + Sync {
 pub(crate) trait SyncMessageHandler<S>: Send + Sync {
     fn handle_sync<'a>(
         &'a self,
-        state: Rc<RefCell<S>>,
+        state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
     ) -> Result<Box<dyn Any + Send>, ActorError>;
 }
@@ -193,13 +196,13 @@ where
 {
     fn handle<'a>(
         &'a self,
-        state: Rc<RefCell<S>>,
+        state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
     ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>> {
         if let Ok(params) = message.downcast::<C>() {
             Box::pin(async move {
-                let mut state = state.borrow_mut();
-                let result = (self.func)(&mut state, *params);
+                let mut state = state.write().await;
+                let result = (self.func)(&mut *state, *params);
                 result.await.map(|r| Box::new(r) as Box<dyn Response>)
             })
         } else {
@@ -216,13 +219,13 @@ where
 {
     fn handle<'a>(
         &'a self,
-        state: Rc<RefCell<S>>,
+        state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
     ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>> {
         if let Ok(params) = message.downcast::<C>() {
             Box::pin(async move {
-                let state = state.borrow_mut();
-                let result = (self.func)(&state, *params);
+                let state = state.read().await;
+                let result = (self.func)(&*state, *params);
                 result.await.map(|r| Box::new(r) as Box<dyn Response>)
             })
         } else {
@@ -239,12 +242,14 @@ where
 {
     fn handle<'a>(
         &'a self,
-        state: Rc<RefCell<S>>,
+        state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
     ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>> {
         if let Ok(params) = message.downcast::<C>() {
-            let result = (self.func)(&mut *state.borrow_mut(), *params);
-            Box::pin(async move { result.map(|r| Box::new(r) as Box<dyn Response>) })
+            Box::pin(async move {
+                let result = (self.func)(&mut *state.write().await, *params);
+                result.map(|r| Box::new(r) as Box<dyn Response>)
+            })
         } else {
             Box::pin(async { Err(ActorError::DispatchError) })
         }
@@ -259,12 +264,12 @@ where
 {
     fn handle_sync<'a>(
         &'a self,
-        state: Rc<RefCell<S>>,
+        state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
     ) -> Result<Box<dyn Any + Send>, ActorError> {
         if let Ok(params) = message.downcast::<C>() {
-            (self.func)(&mut *state.borrow_mut(), *params)
-                .map(|r| Box::new(r) as Box<dyn Any + Send>)
+            let mut state = state.write_blocking();
+            (self.func)(&mut *state, *params).map(|r| Box::new(r) as Box<dyn Any + Send>)
         } else {
             Err(ActorError::DispatchError)
         }
@@ -279,12 +284,14 @@ where
 {
     fn handle<'a>(
         &'a self,
-        state: Rc<RefCell<S>>,
+        state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
     ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>> {
         if let Ok(params) = message.downcast::<C>() {
-            let result = (self.func)(&*state.borrow(), *params);
-            Box::pin(async move { result.map(|r| Box::new(r) as Box<dyn Response>) })
+            Box::pin(async move {
+                let result = (self.func)(&*state.read().await, *params);
+                result.map(|r| Box::new(r) as Box<dyn Response>)
+            })
         } else {
             Box::pin(async { Err(ActorError::DispatchError) })
         }
@@ -299,11 +306,12 @@ where
 {
     fn handle_sync<'a>(
         &'a self,
-        state: Rc<RefCell<S>>,
+        state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
     ) -> Result<Box<dyn Any + Send>, ActorError> {
         if let Ok(params) = message.downcast::<C>() {
-            (self.func)(&*state.borrow(), *params).map(|r| Box::new(r) as Box<dyn Any + Send>)
+            (self.func)(&*state.read_blocking(), *params)
+                .map(|r| Box::new(r) as Box<dyn Any + Send>)
         } else {
             Err(ActorError::DispatchError)
         }
@@ -319,7 +327,7 @@ mod tests {
 
     #[test]
     fn test_async_non_mutating_message_handler() {
-        let state = Rc::new(RefCell::new(0u64));
+        let state = Arc::new(RwLock::new(0u64));
         async fn handler_fn(s: &u64, c: u64) -> Result<u64, ActorError> {
             Ok(s + c)
         }
@@ -336,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_async_mutating_message_handler() {
-        let state = Rc::new(RefCell::new(0u64));
+        let state = Arc::new(RwLock::new(0u64));
         async fn handler_fn(s: &mut u64, c: u64) -> Result<u64, ActorError> {
             *s += c;
             Ok(*s)
@@ -353,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_sync_non_mutating_message_handler() {
-        let state = Rc::new(RefCell::new(0u64));
+        let state = Arc::new(RwLock::new(0u64));
         fn handler_fn(s: &u64, c: u64) -> Result<u64, ActorError> {
             Ok(s + c)
         }
@@ -369,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_sync_mutating_message_handler() {
-        let state = Rc::new(RefCell::new(0u64));
+        let state = Arc::new(RwLock::new(0u64));
         fn handler_fn(s: &mut u64, c: u64) -> Result<u64, ActorError> {
             *s += c;
             Ok(*s)
@@ -388,7 +396,7 @@ mod tests {
     fn test_store_handlers_in_hashmap() {
         use std::collections::HashMap;
 
-        let state = Rc::new(RefCell::new(0u64));
+        let state = Arc::new(RwLock::new(0u64));
 
         async fn async_handler_mut(s: &mut u64, c: u64) -> Result<u64, ActorError> {
             *s += c;
@@ -454,7 +462,7 @@ mod tests {
     fn test_store_sync_handlers_in_hashmap() {
         use std::collections::HashMap;
 
-        let state = Rc::new(RefCell::new(0u64));
+        let state = Arc::new(RwLock::new(0u64));
 
         fn sync_handler_mut(s: &mut u64, c: u64) -> Result<u64, ActorError> {
             *s += c;
