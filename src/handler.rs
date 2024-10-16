@@ -17,7 +17,7 @@ where
     R: 'static,
     E: std::error::Error + Send + Sync + 'static,
 {
-    type Fut: Future<Output = Result<R, E>> + Send;
+    type Fut: Future<Output = Result<R, E>>;
 }
 
 impl<'a, F, S, C, R, E, Fut> AsyncMutatingFunc<'a, S, C, R, E> for F
@@ -27,7 +27,7 @@ where
     C: 'static,
     R: 'static,
     E: std::error::Error + Send + Sync + 'static,
-    Fut: Future<Output = Result<R, E>> + Send,
+    Fut: Future<Output = Result<R, E>>,
 {
     type Fut = Fut;
 }
@@ -39,7 +39,7 @@ where
     R: 'static,
     E: std::error::Error + Send + Sync + 'static,
 {
-    type Fut: Future<Output = Result<R, E>> + Send;
+    type Fut: Future<Output = Result<R, E>>;
 }
 
 impl<'a, F, S, C, R, E, Fut> AsyncFunc<'a, S, C, R, E> for F
@@ -49,7 +49,7 @@ where
     C: 'static,
     R: 'static,
     E: std::error::Error + Send + Sync + 'static,
-    Fut: Future<Output = Result<R, E>> + Send,
+    Fut: Future<Output = Result<R, E>>,
 {
     type Fut = Fut;
 }
