@@ -1,6 +1,6 @@
 ---
 source: src/actor.rs
-expression: "final_order.iter().map(|(id, msg, state)|\nformat!(\"({}, {}, {})\", id, msg, state)).collect::<Vec<String>>().join(\"\\n\")"
+expression: "final_order.iter().map(|(id, msg, state)|\nformat!(\"({id}, {msg}, {state})\")).collect::<Vec<String>>().join(\"\\n\")"
 ---
 (0, A, start)
 (1, B, start)

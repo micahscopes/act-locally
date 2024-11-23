@@ -1,0 +1,18 @@
+---
+source: src/actor.rs
+expression: "final_order.join(\"\\n\")"
+---
+(0, 0, SyncNonMut, start)
+(0, 0, SyncNonMut, end)
+(1, 1, SyncNonMut, start)
+(1, 1, SyncNonMut, end)
+(2, 2, SyncMut, start)
+(2, 2, SyncMut, end)
+(3, 3, SyncNonMut, start)
+(3, 3, SyncNonMut, end)
+(4, 4, SyncNonMut, start)
+(4, 4, SyncNonMut, end)
+(5, 5, SyncMut, start)
+(5, 5, SyncMut, end)
+(6, 6, SyncNonMut, start)
+(6, 6, SyncNonMut, end)

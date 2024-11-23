@@ -1,0 +1,18 @@
+---
+source: src/actor.rs
+expression: "final_order.join(\"\\n\")"
+---
+(0, 0, AsyncNonMut, start)
+(1, 1, AsyncNonMut, start)
+(0, 0, AsyncNonMut, end)
+(1, 1, AsyncNonMut, end)
+(2, 2, AsyncMut, start)
+(2, 2, AsyncMut, end)
+(3, 3, AsyncNonMut, start)
+(3, 3, AsyncNonMut, end)
+(4, 5, AsyncMut, start)
+(4, 5, AsyncMut, end)
+(5, 6, AsyncNonMut, start)
+(6, 4, AsyncNonMut, start)
+(5, 6, AsyncNonMut, end)
+(6, 4, AsyncNonMut, end)

@@ -3,15 +3,6 @@ use std::{any::Any, hash::Hash};
 
 use crate::types::{ActorError, BoxedAny};
 
-// #[derive(Clone, Hash, Eq, PartialEq, Debug)]
-// pub struct MessageKey(pub String);
-
-// impl MessageKey {
-//     pub fn new(key: &str) -> Self {
-//         MessageKey(key.to_string())
-//     }
-// }
-
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub struct MessageKey<K>(pub K)
 where

@@ -149,6 +149,7 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
                     }
                 };
                 exec.spawn(task).detach();
+                // exec.tick();
             }
             info!("Actor run loop finished");
         })
@@ -585,6 +586,470 @@ mod tests {
                 .map(|(id, msg, state)| format!("({id}, {msg}, {state})"))
                 .collect::<Vec<String>>()
                 .join("\n"));
+        });
+    }
+
+    // COMPREHENSIVE CONCURRENCY TESTING
+    #[derive(Clone, Debug)]
+    struct AsyncNonMutMessage(Option<usize>);
+    #[derive(Clone, Debug)]
+    struct AsyncMutMessage(Option<usize>);
+    #[derive(Clone, Debug)]
+    struct SyncNonMutMessage(Option<usize>);
+    #[derive(Clone, Debug)]
+    struct SyncMutMessage(Option<usize>);
+    #[derive(Clone, Debug)]
+    struct GetStateMessage;
+
+    impl Default for AsyncNonMutMessage {
+        fn default() -> Self {
+            AsyncNonMutMessage(None)
+        }
+    }
+
+    impl Default for AsyncMutMessage {
+        fn default() -> Self {
+            AsyncMutMessage(None)
+        }
+    }
+
+    impl Default for SyncNonMutMessage {
+        fn default() -> Self {
+            SyncNonMutMessage(None)
+        }
+    }
+
+    impl Default for SyncMutMessage {
+        fn default() -> Self {
+            SyncMutMessage(None)
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    enum ConcurrentTestMessageKey {
+        AsyncNonMut,
+        AsyncMut,
+        SyncNonMut,
+        SyncMut,
+        GetState,
+    }
+
+    struct ConcurrentTestDispatcher {
+        counter: AtomicUsize,
+    }
+
+    impl ConcurrentTestDispatcher {
+        fn new() -> Self {
+            ConcurrentTestDispatcher {
+                counter: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Dispatcher<ConcurrentTestMessageKey> for ConcurrentTestDispatcher {
+        fn message_key(
+            &self,
+            message: &dyn Message,
+        ) -> Result<MessageKey<ConcurrentTestMessageKey>, ActorError> {
+            if message.is::<AsyncNonMutMessage>() {
+                Ok(MessageKey(ConcurrentTestMessageKey::AsyncNonMut))
+            } else if message.is::<AsyncMutMessage>() {
+                Ok(MessageKey(ConcurrentTestMessageKey::AsyncMut))
+            } else if message.is::<SyncNonMutMessage>() {
+                Ok(MessageKey(ConcurrentTestMessageKey::SyncNonMut))
+            } else if message.is::<SyncMutMessage>() {
+                Ok(MessageKey(ConcurrentTestMessageKey::SyncMut))
+            } else if message.is::<GetStateMessage>() {
+                Ok(MessageKey(ConcurrentTestMessageKey::GetState))
+            } else {
+                Err(ActorError::DispatchError)
+            }
+        }
+
+        fn wrap(
+            &self,
+            message: Box<dyn Message>,
+            key: MessageKey<ConcurrentTestMessageKey>,
+        ) -> Result<Box<dyn Message>, ActorError> {
+            let order = self.counter.fetch_add(1, Ordering::SeqCst);
+            match key.0 {
+                ConcurrentTestMessageKey::AsyncNonMut => {
+                    let mut msg = message.downcast::<AsyncNonMutMessage>().unwrap();
+                    *msg = AsyncNonMutMessage(Some(order));
+                    Ok(msg)
+                }
+                ConcurrentTestMessageKey::AsyncMut => {
+                    let mut msg = message.downcast::<AsyncMutMessage>().unwrap();
+                    *msg = AsyncMutMessage(Some(order));
+                    Ok(msg)
+                }
+                ConcurrentTestMessageKey::SyncNonMut => {
+                    let mut msg = message.downcast::<SyncNonMutMessage>().unwrap();
+                    *msg = SyncNonMutMessage(Some(order));
+                    Ok(msg)
+                }
+                ConcurrentTestMessageKey::SyncMut => {
+                    let mut msg = message.downcast::<SyncMutMessage>().unwrap();
+                    *msg = SyncMutMessage(Some(order));
+                    Ok(msg)
+                }
+                ConcurrentTestMessageKey::GetState => Ok(message),
+            }
+        }
+
+        fn unwrap(
+            &self,
+            message: Box<dyn Response>,
+            _key: MessageKey<ConcurrentTestMessageKey>,
+        ) -> Result<Box<dyn Response>, ActorError> {
+            Ok(message)
+        }
+    }
+
+    #[derive(Clone)]
+    struct ConcurrencyTestState {
+        execution_log: Arc<smol::lock::Mutex<Vec<String>>>,
+        id_counter: Arc<AtomicUsize>,
+    }
+
+    impl std::fmt::Debug for ConcurrencyTestState {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ConcurrencyTestState")
+                // .field("counter", &self.counter)
+                // .field("messages", &self.messages)
+                .finish()
+        }
+    }
+
+    async fn async_non_mut_handler(
+        state: &ConcurrencyTestState,
+        AsyncNonMutMessage(msg): AsyncNonMutMessage,
+    ) -> Result<(), ActorError> {
+        let id = state.id_counter.fetch_add(1, Ordering::SeqCst);
+        log_execution(
+            &state.execution_log,
+            id,
+            &msg.unwrap().to_string(),
+            "AsyncNonMut",
+            "start",
+        )
+        .await;
+        smol::future::yield_now().await;
+        log_execution(
+            &state.execution_log,
+            id,
+            &msg.unwrap().to_string(),
+            "AsyncNonMut",
+            "end",
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn async_mut_handler(
+        state: &mut ConcurrencyTestState,
+        AsyncMutMessage(msg): AsyncMutMessage,
+    ) -> Result<(), ActorError> {
+        let id = state.id_counter.fetch_add(1, Ordering::SeqCst);
+        log_execution(
+            &state.execution_log,
+            id,
+            &msg.unwrap().to_string(),
+            "AsyncMut",
+            "start",
+        )
+        .await;
+        smol::future::yield_now().await;
+        log_execution(
+            &state.execution_log,
+            id,
+            &msg.unwrap().to_string(),
+            "AsyncMut",
+            "end",
+        )
+        .await;
+        Ok(())
+    }
+
+    fn sync_non_mut_handler(
+        state: &ConcurrencyTestState,
+        SyncNonMutMessage(msg): SyncNonMutMessage,
+    ) -> Result<(), ActorError> {
+        let id = state.id_counter.fetch_add(1, Ordering::SeqCst);
+        smol::block_on(log_execution(
+            &state.execution_log,
+            id,
+            &msg.unwrap().to_string(),
+            "SyncNonMut",
+            "start",
+        ));
+        std::thread::sleep(Duration::from_millis(3));
+        smol::block_on(log_execution(
+            &state.execution_log,
+            id,
+            &msg.unwrap().to_string(),
+            "SyncNonMut",
+            "end",
+        ));
+        Ok(())
+    }
+
+    fn sync_mut_handler(
+        state: &mut ConcurrencyTestState,
+        SyncMutMessage(msg): SyncMutMessage,
+    ) -> Result<(), ActorError> {
+        let id = state.id_counter.fetch_add(1, Ordering::SeqCst);
+        smol::block_on(log_execution(
+            &state.execution_log,
+            id,
+            &msg.unwrap().to_string(),
+            "SyncMut",
+            "start",
+        ));
+        std::thread::sleep(Duration::from_millis(3));
+        smol::block_on(log_execution(
+            &state.execution_log,
+            id,
+            &msg.unwrap().to_string(),
+            "SyncMut",
+            "end",
+        ));
+        Ok(())
+    }
+
+    fn get_state_handler(
+        state: &ConcurrencyTestState,
+        _: GetStateMessage,
+    ) -> Result<ConcurrencyTestState, ActorError> {
+        Ok(state.clone())
+    }
+
+    async fn log_execution(
+        log: &Arc<smol::lock::Mutex<Vec<String>>>,
+        id: usize,
+        msg: &str,
+        handler_type: &str,
+        state: &str,
+    ) {
+        let mut log = log.lock().await;
+        log.push(format!("({id}, {msg}, {handler_type}, {state})"));
+    }
+
+    #[test]
+    fn test_comprehensive_handler_execution_order() {
+        let dispatcher = ConcurrentTestDispatcher::new();
+        let actor_ref: ActorRef<ConcurrencyTestState, ConcurrentTestMessageKey> =
+            ActorBuilder::new()
+                .with_state_init(|| {
+                    Ok(ConcurrencyTestState {
+                        execution_log: Arc::new(smol::lock::Mutex::new(Vec::new())),
+                        id_counter: Arc::new(AtomicUsize::new(0)),
+                    })
+                })
+                .spawn()
+                .expect("Failed to spawn actor");
+
+        actor_ref.register_handler_sync(
+            MessageKey(ConcurrentTestMessageKey::GetState),
+            get_state_handler,
+        );
+
+        actor_ref.register_handler_async(
+            MessageKey(ConcurrentTestMessageKey::AsyncNonMut),
+            async_non_mut_handler,
+        );
+        actor_ref.register_handler_async_mutating(
+            MessageKey(ConcurrentTestMessageKey::AsyncMut),
+            async_mut_handler,
+        );
+        actor_ref.register_handler_sync(
+            MessageKey(ConcurrentTestMessageKey::SyncNonMut),
+            sync_non_mut_handler,
+        );
+        actor_ref.register_handler_sync_mutating(
+            MessageKey(ConcurrentTestMessageKey::SyncMut),
+            sync_mut_handler,
+        );
+
+        future::block_on(async move {
+            // Interleave async and sync non-mutating messages, punctuated by mutating ones
+            actor_ref
+                .tell(&dispatcher, AsyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, SyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AsyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AsyncMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, SyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AsyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, SyncMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AsyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, SyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AsyncMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AsyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, SyncNonMutMessage::default())
+                .unwrap();
+
+            // Allow time for processing
+            smol::Timer::after(Duration::from_millis(50)).await;
+
+            let state: ConcurrencyTestState = actor_ref
+                .ask(&dispatcher, GetStateMessage)
+                .await
+                .expect("Failed to get state");
+
+            let final_order = state.execution_log.lock().await.clone();
+
+            insta::assert_snapshot!(final_order.join("\n"));
+        });
+    }
+
+    #[test]
+    fn test_async_handlers_execution_order() {
+        let dispatcher = ConcurrentTestDispatcher::new();
+        let actor_ref: ActorRef<ConcurrencyTestState, ConcurrentTestMessageKey> =
+            ActorBuilder::new()
+                .with_state_init(|| {
+                    Ok(ConcurrencyTestState {
+                        execution_log: Arc::new(smol::lock::Mutex::new(Vec::new())),
+                        id_counter: Arc::new(AtomicUsize::new(0)),
+                    })
+                })
+                .spawn()
+                .expect("Failed to spawn actor");
+
+        actor_ref.register_handler_async(
+            MessageKey(ConcurrentTestMessageKey::AsyncNonMut),
+            async_non_mut_handler,
+        );
+        actor_ref.register_handler_async_mutating(
+            MessageKey(ConcurrentTestMessageKey::AsyncMut),
+            async_mut_handler,
+        );
+        actor_ref.register_handler_sync(
+            MessageKey(ConcurrentTestMessageKey::GetState),
+            get_state_handler,
+        );
+
+        future::block_on(async move {
+            actor_ref
+                .tell(&dispatcher, AsyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AsyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AsyncMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AsyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AsyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AsyncMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AsyncNonMutMessage::default())
+                .unwrap();
+
+            // Allow time for processing
+            smol::Timer::after(Duration::from_millis(50)).await;
+
+            let state: ConcurrencyTestState = actor_ref
+                .ask(&dispatcher, GetStateMessage)
+                .await
+                .expect("Failed to get state");
+
+            let final_order = state.execution_log.lock().await.clone();
+
+            insta::assert_snapshot!(final_order.join("\n"));
+        });
+    }
+
+    #[test]
+    fn test_sync_handlers_execution_order() {
+        let dispatcher = ConcurrentTestDispatcher::new();
+        let actor_ref: ActorRef<ConcurrencyTestState, ConcurrentTestMessageKey> =
+            ActorBuilder::new()
+                .with_state_init(|| {
+                    Ok(ConcurrencyTestState {
+                        execution_log: Arc::new(smol::lock::Mutex::new(Vec::new())),
+                        id_counter: Arc::new(AtomicUsize::new(0)),
+                    })
+                })
+                .spawn()
+                .expect("Failed to spawn actor");
+
+        actor_ref.register_handler_sync(
+            MessageKey(ConcurrentTestMessageKey::GetState),
+            get_state_handler,
+        );
+
+        actor_ref.register_handler_sync(
+            MessageKey(ConcurrentTestMessageKey::SyncNonMut),
+            sync_non_mut_handler,
+        );
+        actor_ref.register_handler_sync_mutating(
+            MessageKey(ConcurrentTestMessageKey::SyncMut),
+            sync_mut_handler,
+        );
+
+        future::block_on(async move {
+            actor_ref
+                .tell(&dispatcher, SyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, SyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, SyncMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, SyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, SyncNonMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, SyncMutMessage::default())
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, SyncNonMutMessage::default())
+                .unwrap();
+
+            // Allow time for processing
+            smol::Timer::after(Duration::from_millis(50)).await;
+
+            let state: ConcurrencyTestState = actor_ref
+                .ask(&dispatcher, GetStateMessage)
+                .await
+                .expect("Failed to get state");
+
+            let final_order = state.execution_log.lock().await.clone();
+
+            insta::assert_snapshot!(final_order.join("\n"));
         });
     }
 }
