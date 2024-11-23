@@ -579,25 +579,12 @@ mod tests {
                 .lock()
                 .await
                 .clone();
-            // println!("Execution order: {:?}", final_order);
 
-            assert_eq!(
-                final_order,
-                vec![
-                    (0, "A".to_string(), "start"),
-                    (1, "B".to_string(), "start"),
-                    (2, "C".to_string(), "start"),
-                    (0, "A".to_string(), "end"),
-                    (1, "B".to_string(), "end"),
-                    (2, "C".to_string(), "end"),
-                    (3, "+1".to_string(), "start"),
-                    (3, "+1".to_string(), "end"),
-                    (4, "+2".to_string(), "start"),
-                    (4, "+2".to_string(), "end"),
-                    (5, "+3".to_string(), "start"),
-                    (5, "+3".to_string(), "end")
-                ]
-            );
+            insta::assert_snapshot!(final_order
+                .iter()
+                .map(|(id, msg, state)| format!("({id}, {msg}, {state})"))
+                .collect::<Vec<String>>()
+                .join("\n"));
         });
     }
 }
