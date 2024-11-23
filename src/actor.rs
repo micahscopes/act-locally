@@ -70,7 +70,7 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
                     info!("Building local executor on spawned thread");
                     let exec = LocalExecutor::new();
                     let actor_task_span = info_span!("actor task");
-                    let task = async move {
+                    let task = async {
                         // let actor_task_span = actor_task_span.enter();
                         info!("Constructing actor state");
                         match init_state() {
@@ -78,7 +78,8 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
                                 let (mut actor, actor_ref) = Actor::new(state);
                                 tx.send(Ok(actor_ref.clone())).unwrap();
                                 info!("Starting actor run loop");
-                                let run_result = AssertUnwindSafe(actor.run()).catch_unwind().await;
+                                let run_result =
+                                    AssertUnwindSafe(actor.run(&exec)).catch_unwind().await;
                                 if let Err(panic_info) = run_result {
                                     error!("Actor run loop panicked: {:?}", panic_info);
                                 }
@@ -114,36 +115,40 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
             })
     }
 
-    pub async fn run(&mut self) -> Result<(), ActorError> {
+    pub async fn run(&mut self, exec: &LocalExecutor<'static>) -> Result<(), ActorError> {
         let result = panic::AssertUnwindSafe(async {
             info!("Actor run loop started");
             while let Some(message) = self.receiver.next().await {
                 info!("Actor got a new message...");
-                match message {
-                    ActorMessage::Notification(key, payload) => {
-                        let handlers = self.handlers.read().unwrap();
-                        if let Some(handler) = handlers.get(&key) {
-                            info!("Handling notification with key: {key:?}");
-                            if let Err(e) = handler.handle(self.state.clone(), payload).await {
-                                info!("Handler error: {e:?}");
+                let handlers = self.handlers.clone();
+                let state = self.state.clone();
+                let task = async move {
+                    match message {
+                        ActorMessage::Notification(key, payload) => {
+                            let handlers = handlers.read().unwrap();
+                            if let Some(handler) = handlers.get(&key) {
+                                info!("Handling notification with key: {key:?}");
+                                if let Err(e) = handler.handle(state, payload).await {
+                                    info!("Handler error: {e:?}");
+                                }
+                            } else {
+                                error!("No handler found for key: {key:?}");
                             }
-                        } else {
-                            error!("No handler found for key: {key:?}");
+                        }
+                        ActorMessage::Request(key, payload, response_tx) => {
+                            let handlers = handlers.read().unwrap();
+                            if let Some(handler) = handlers.get(&key) {
+                                info!("Handling request with key: {key:?}");
+                                let result = handler.handle(state, payload).await;
+                                let _ = response_tx.send(result);
+                            } else {
+                                error!("No handler found for key: {:?}", key);
+                                let _ = response_tx.send(Err(ActorError::HandlerNotFound));
+                            }
                         }
                     }
-                    ActorMessage::Request(key, payload, response_tx) => {
-                        let handlers = self.handlers.read().unwrap();
-                        if let Some(handler) = handlers.get(&key) {
-                            info!("Handling request with key: {key:?}");
-                            let result = handler.handle(self.state.clone(), payload).await;
-                            let _ = response_tx.send(result);
-                        } else {
-                            error!("No handler found for key: {:?}", key);
-                            let _ = response_tx.send(Err(ActorError::HandlerNotFound));
-                        }
-                    }
-                }
-                // smol::future::yield_now().await;
+                };
+                exec.spawn(task).detach();
             }
             info!("Actor run loop finished");
         })
@@ -283,7 +288,13 @@ mod tests {
     use crate::message::{Message, MessageDowncast, Response};
 
     use super::*;
-    use std::thread::sleep;
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            OnceLock,
+        },
+        thread::sleep,
+    };
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     enum TestMessageKey {
@@ -293,7 +304,7 @@ mod tests {
         GetMessages,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     struct TestState {
         counter: i32,
         messages: Vec<String>,
@@ -453,8 +464,140 @@ mod tests {
             assert_eq!(messages, vec!["Hello".to_string(), "World".to_string()]);
         });
 
-        // future::block_on(task);
-
         println!("All tests passed successfully!");
+    }
+
+    #[test]
+    fn test_yielding_handlers() {
+        // TODO: also cover sync handlers
+        use std::sync::Arc;
+        static EXECUTION_LOG: OnceLock<Arc<smol::lock::Mutex<Vec<(usize, String, &'static str)>>>> =
+            OnceLock::new();
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let dispatcher = TestDispatcher;
+        let mut actor_ref: ActorRef<TestState, TestMessageKey> = ActorBuilder::new()
+            .with_state_init(|| {
+                Ok(TestState {
+                    counter: 0,
+                    messages: Vec::new(),
+                })
+            })
+            .spawn()
+            .expect("Failed to spawn actor");
+
+        actor_ref.register_handlers();
+
+        async fn yielding_nonmutating_handler(
+            _state: &TestState,
+            AppendMessage(msg): AppendMessage,
+        ) -> Result<(), ActorError> {
+            let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+            {
+                let mut log = EXECUTION_LOG
+                    .get_or_init(|| Arc::new(smol::lock::Mutex::new(Vec::new())))
+                    .lock()
+                    .await;
+                log.push((id, msg.clone(), "start"));
+            }
+
+            smol::future::yield_now().await;
+
+            {
+                let mut log = EXECUTION_LOG
+                    .get_or_init(|| Arc::new(smol::lock::Mutex::new(Vec::new())))
+                    .lock()
+                    .await;
+                log.push((id, msg.clone(), "end"));
+            }
+            Ok(())
+        }
+
+        actor_ref.register_handler_async(
+            MessageKey(TestMessageKey::Append),
+            yielding_nonmutating_handler,
+        );
+
+        async fn yielding_mutating_handler(
+            state: &mut TestState,
+            IncrementMessage(msg): IncrementMessage,
+        ) -> Result<(), ActorError> {
+            let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+            {
+                let mut log = EXECUTION_LOG
+                    .get_or_init(|| Arc::new(smol::lock::Mutex::new(Vec::new())))
+                    .lock()
+                    .await;
+                log.push((id, format!("+{}", msg.clone()), "start"));
+            }
+
+            smol::future::yield_now().await;
+
+            {
+                let mut log = EXECUTION_LOG
+                    .get_or_init(|| Arc::new(smol::lock::Mutex::new(Vec::new())))
+                    .lock()
+                    .await;
+                log.push((id, format!("+{}", msg.clone()), "end"));
+            }
+
+            state.counter += msg;
+            Ok(())
+        }
+
+        actor_ref.register_handler_async_mutating(
+            MessageKey(TestMessageKey::Increment),
+            yielding_mutating_handler,
+        );
+
+        future::block_on(async move {
+            actor_ref
+                .tell(&dispatcher, AppendMessage("A".to_string()))
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AppendMessage("B".to_string()))
+                .unwrap();
+            actor_ref
+                .tell(&dispatcher, AppendMessage("C".to_string()))
+                .unwrap();
+
+            actor_ref
+                .tell(&dispatcher, IncrementMessage(1))
+                .expect("Failed to send increment 1");
+            actor_ref
+                .tell(&dispatcher, IncrementMessage(2))
+                .expect("Failed to send increment 2");
+            actor_ref
+                .tell(&dispatcher, IncrementMessage(3))
+                .expect("Failed to send increment 3");
+
+            // Allow some time for processing
+            smol::Timer::after(Duration::from_millis(1)).await;
+
+            let final_order = EXECUTION_LOG
+                .get()
+                .expect("EXECUTION_ORDER should be initialized")
+                .lock()
+                .await
+                .clone();
+            // println!("Execution order: {:?}", final_order);
+
+            assert_eq!(
+                final_order,
+                vec![
+                    (0, "A".to_string(), "start"),
+                    (1, "B".to_string(), "start"),
+                    (2, "C".to_string(), "start"),
+                    (0, "A".to_string(), "end"),
+                    (1, "B".to_string(), "end"),
+                    (2, "C".to_string(), "end"),
+                    (3, "+1".to_string(), "start"),
+                    (3, "+1".to_string(), "end"),
+                    (4, "+2".to_string(), "start"),
+                    (4, "+2".to_string(), "end"),
+                    (5, "+3".to_string(), "start"),
+                    (5, "+3".to_string(), "end")
+                ]
+            );
+        });
     }
 }
