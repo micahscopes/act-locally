@@ -22,6 +22,12 @@ pub trait Dispatcher<K: Eq + Hash + Debug>: Send + Sync + 'static {
 
 pub struct GenericDispatcher;
 
+impl Default for GenericDispatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GenericDispatcher {
     pub fn new() -> Self {
         Self

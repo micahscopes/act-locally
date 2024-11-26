@@ -3,13 +3,13 @@ use crate::types::ActorError;
 use futures::future::LocalBoxFuture;
 use futures::FutureExt;
 use std::any::Any;
-// use std::cell::RefCell;
-// use std::rc::Rc;
 use std::future::Future;
 
 use smol::lock::RwLock;
 use std::sync::Arc;
 
+/// Trait for asynchronous mutating message handlers.
+/// Allows registering async functions that can modify actor state.
 pub trait AsyncMutatingFunc<'a, S, C, R, E>: Fn(&'a mut S, C) -> Self::Fut + Send + Sync
 where
     S: 'static,
@@ -32,6 +32,8 @@ where
     type Fut = Fut;
 }
 
+/// Trait for asynchronous non-mutating message handlers.
+/// Allows registering async functions that don't modify actor state.
 pub trait AsyncFunc<'a, S, C, R, E>: Fn(&'a S, C) -> Self::Fut + Send + Sync
 where
     S: 'static,
@@ -57,11 +59,13 @@ where
 type BoxAsyncMutatingFunc<S, C, R> =
     Box<dyn for<'a> Fn(&'a mut S, C) -> LocalBoxFuture<'a, Result<R, ActorError>> + Send + Sync>;
 
+/// Wrapper for async mutating message handlers.
 pub(crate) struct AsyncMutatingHandler<S, C, R> {
     func: BoxAsyncMutatingFunc<S, C, R>,
 }
 
 impl<S: 'static, C: 'static, R: 'static> AsyncMutatingHandler<S, C, R> {
+    /// Creates a new AsyncMutatingHandler from an async function.
     pub fn new<F, E>(f: F) -> Self
     where
         F: for<'a> AsyncMutatingFunc<'a, S, C, R, E> + 'static,
@@ -78,11 +82,13 @@ impl<S: 'static, C: 'static, R: 'static> AsyncMutatingHandler<S, C, R> {
 type BoxAsyncFunc<S, C, R> =
     Box<dyn for<'a> Fn(&'a S, C) -> LocalBoxFuture<'a, Result<R, ActorError>> + Send + Sync>;
 
+/// Wrapper for async non-mutating message handlers.
 pub(crate) struct AsyncHandler<S, C, R> {
     func: BoxAsyncFunc<S, C, R>,
 }
 
 impl<S: 'static, C: 'static, R: 'static> AsyncHandler<S, C, R> {
+    /// Creates a new AsyncHandler from an async function.
     pub fn new<F, E>(f: F) -> Self
     where
         F: for<'a> AsyncFunc<'a, S, C, R, E> + 'static,
@@ -96,6 +102,8 @@ impl<S: 'static, C: 'static, R: 'static> AsyncHandler<S, C, R> {
     }
 }
 
+/// Trait for synchronous mutating message handlers.
+/// Allows registering synchronous functions that can modify actor state.
 pub trait SyncMutatingFunc<'a, S, C, R, E>: Fn(&'a mut S, C) -> Result<R, E> + Send + Sync
 where
     S: 'static,
@@ -115,6 +123,8 @@ where
 {
 }
 
+/// Trait for synchronous non-mutating message handlers.
+/// Allows registering synchronous functions that don't modify actor state.
 pub trait SyncFunc<'a, S, C, R, E>: Fn(&'a S, C) -> Result<R, E> + Send + Sync
 where
     S: 'static,
@@ -137,11 +147,13 @@ where
 type BoxSyncMutatingFunc<S, C, R> =
     Box<dyn for<'a> Fn(&'a mut S, C) -> Result<R, ActorError> + Send + Sync>;
 
+/// Wrapper for synchronous mutating message handlers.
 pub(crate) struct SyncMutatingHandler<S, C, R> {
     func: BoxSyncMutatingFunc<S, C, R>,
 }
 
 impl<S: 'static, C: 'static, R: 'static> SyncMutatingHandler<S, C, R> {
+    /// Creates a new SyncMutatingHandler from a synchronous function.
     pub fn new<F, E>(f: F) -> Self
     where
         F: for<'a> SyncMutatingFunc<'a, S, C, R, E> + 'static,
@@ -155,11 +167,13 @@ impl<S: 'static, C: 'static, R: 'static> SyncMutatingHandler<S, C, R> {
 
 type BoxSyncFunc<S, C, R> = Box<dyn for<'a> Fn(&'a S, C) -> Result<R, ActorError> + Send + Sync>;
 
+/// Wrapper for synchronous non-mutating message handlers.
 pub(crate) struct SyncHandler<S, C, R> {
     func: BoxSyncFunc<S, C, R>,
 }
 
 impl<S: 'static, C: 'static, R: 'static> SyncHandler<S, C, R> {
+    /// Creates a new SyncHandler from a synchronous function.
     pub fn new<F, E>(f: F) -> Self
     where
         F: for<'a> SyncFunc<'a, S, C, R, E> + 'static,
@@ -171,18 +185,22 @@ impl<S: 'static, C: 'static, R: 'static> SyncHandler<S, C, R> {
     }
 }
 
+/// Trait for async message handlers.
+/// Implemented by AsyncMutatingHandler and AsyncHandler.
 pub(crate) trait AsyncMessageHandler<S>: Send + Sync {
-    fn handle<'a>(
-        &'a self,
+    fn handle(
+        &self,
         state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
-    ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>>;
+    ) -> LocalBoxFuture<'_, Result<Box<dyn Response>, ActorError>>;
 }
 
+/// Trait for synchronous message handlers.
+/// Implemented by SyncMutatingHandler and SyncHandler.
 #[allow(unused)]
 pub(crate) trait SyncMessageHandler<S>: Send + Sync {
-    fn handle_sync<'a>(
-        &'a self,
+    fn handle_sync(
+        &self,
         state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
     ) -> Result<Box<dyn Any + Send>, ActorError>;
@@ -194,11 +212,11 @@ where
     C: 'static + Send,
     R: 'static + Send + Any,
 {
-    fn handle<'a>(
-        &'a self,
+    fn handle(
+        &self,
         state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
-    ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>> {
+    ) -> LocalBoxFuture<'_, Result<Box<dyn Response>, ActorError>> {
         if let Ok(params) = message.downcast::<C>() {
             Box::pin(async move {
                 let mut state = state.write().await;
@@ -217,11 +235,11 @@ where
     C: 'static + Send,
     R: 'static + Send + Any,
 {
-    fn handle<'a>(
-        &'a self,
+    fn handle(
+        &self,
         state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
-    ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>> {
+    ) -> LocalBoxFuture<'_, Result<Box<dyn Response>, ActorError>> {
         if let Ok(params) = message.downcast::<C>() {
             Box::pin(async move {
                 let state = state.read().await;
@@ -240,11 +258,11 @@ where
     C: 'static + Send,
     R: 'static + Send + Any,
 {
-    fn handle<'a>(
-        &'a self,
+    fn handle(
+        &self,
         state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
-    ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>> {
+    ) -> LocalBoxFuture<'_, Result<Box<dyn Response>, ActorError>> {
         if let Ok(params) = message.downcast::<C>() {
             Box::pin(async move {
                 let result = (self.func)(&mut *state.write().await, *params);
@@ -262,8 +280,8 @@ where
     C: 'static + Send,
     R: 'static + Send + Any,
 {
-    fn handle_sync<'a>(
-        &'a self,
+    fn handle_sync(
+        &self,
         state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
     ) -> Result<Box<dyn Any + Send>, ActorError> {
@@ -282,11 +300,11 @@ where
     C: 'static + Send,
     R: 'static + Send + Any,
 {
-    fn handle<'a>(
-        &'a self,
+    fn handle(
+        &self,
         state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
-    ) -> LocalBoxFuture<'a, Result<Box<dyn Response>, ActorError>> {
+    ) -> LocalBoxFuture<'_, Result<Box<dyn Response>, ActorError>> {
         if let Ok(params) = message.downcast::<C>() {
             Box::pin(async move {
                 let result = (self.func)(&*state.read().await, *params);
@@ -304,8 +322,8 @@ where
     C: 'static + Send,
     R: 'static + Send + Any,
 {
-    fn handle_sync<'a>(
-        &'a self,
+    fn handle_sync(
+        &self,
         state: Arc<RwLock<S>>,
         message: Box<dyn Message>,
     ) -> Result<Box<dyn Any + Send>, ActorError> {

@@ -14,6 +14,16 @@ pub struct ActorBuilder<S, K> {
     phantom: std::marker::PhantomData<K>,
 }
 
+impl<S, K> Default for ActorBuilder<S, K>
+where
+    S: 'static,
+    K: Eq + Hash + Debug + Clone + Send + Sync + 'static,
+ {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<S, K> ActorBuilder<S, K>
 where
     S: 'static,

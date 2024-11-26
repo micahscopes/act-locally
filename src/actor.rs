@@ -8,13 +8,14 @@ use crate::message::{ActorMessage, MessageKey, Response, ResponseDowncast};
 use crate::types::ActorError;
 use ::futures::channel::mpsc;
 use smol::future::{self, FutureExt};
+use smol::lock::RwLock;
 use smol::stream::StreamExt;
 use smol::LocalExecutor;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::instrument::WithSubscriber;
 use tracing::{debug, error, info, info_span, span, Instrument, Level};
@@ -92,10 +93,11 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
                         info!("Actor run loop finished");
                     }
                     .instrument(actor_task_span);
+
                     future::block_on(exec.run(task).with_current_subscriber());
-                    drop(tracing_hook);
-                }
-                .instrument(actor_thread_span)
+                    drop(tracing_hook)
+                };
+                ().instrument(actor_thread_span)
             })
             .expect("Failed to spawn actor thread");
 
@@ -125,7 +127,7 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
                 let task = async move {
                     match message {
                         ActorMessage::Notification(key, payload) => {
-                            let handlers = handlers.read().unwrap();
+                            let handlers = handlers.read().await;
                             if let Some(handler) = handlers.get(&key) {
                                 info!("Handling notification with key: {key:?}");
                                 if let Err(e) = handler.handle(state, payload).await {
@@ -136,7 +138,7 @@ impl<S: 'static, K: Eq + Hash + Debug + Send + Sync + Clone + 'static> Actor<S, 
                             }
                         }
                         ActorMessage::Request(key, payload, response_tx) => {
-                            let handlers = handlers.read().unwrap();
+                            let handlers = handlers.read().await;
                             if let Some(handler) = handlers.get(&key) {
                                 info!("Handling request with key: {key:?}");
                                 let result = handler.handle(state, payload).await;
@@ -233,9 +235,8 @@ impl<S: 'static, K: Eq + Hash + Debug + Clone> ActorRef<S, K> {
         F: for<'a> AsyncFunc<'a, S, C, R, E> + 'static,
     {
         let handler = AsyncHandler::new(handler);
-        if let Ok(mut handlers) = self.handlers.write() {
-            handlers.insert(key, Box::new(handler));
-        }
+        let mut handlers = self.handlers.write_blocking();
+        handlers.insert(key, Box::new(handler));
     }
 
     pub fn register_handler_sync<C, R, E, F>(&self, key: MessageKey<K>, handler: F)
@@ -246,9 +247,8 @@ impl<S: 'static, K: Eq + Hash + Debug + Clone> ActorRef<S, K> {
         F: for<'a> SyncFunc<'a, S, C, R, E> + 'static,
     {
         let handler = SyncHandler::new(handler);
-        if let Ok(mut handlers) = self.handlers.write() {
-            handlers.insert(key, Box::new(handler));
-        }
+        let mut handlers = self.handlers.write_blocking();
+        handlers.insert(key, Box::new(handler));
     }
 
     pub fn register_handler_async_mutating<C, R, E, F>(&self, key: MessageKey<K>, handler: F)
@@ -259,9 +259,8 @@ impl<S: 'static, K: Eq + Hash + Debug + Clone> ActorRef<S, K> {
         F: for<'a> AsyncMutatingFunc<'a, S, C, R, E> + 'static,
     {
         let handler = AsyncMutatingHandler::new(handler);
-        if let Ok(mut handlers) = self.handlers.write() {
-            handlers.insert(key, Box::new(handler));
-        }
+        let mut handlers = self.handlers.write_blocking();
+        handlers.insert(key, Box::new(handler));
     }
 
     pub fn register_handler_sync_mutating<C, R, E, F>(&self, key: MessageKey<K>, handler: F)
@@ -272,9 +271,8 @@ impl<S: 'static, K: Eq + Hash + Debug + Clone> ActorRef<S, K> {
         F: for<'a> SyncMutatingFunc<'a, S, C, R, E> + 'static,
     {
         let handler = SyncMutatingHandler::new(handler);
-        if let Ok(mut handlers) = self.handlers.write() {
-            handlers.insert(key, Box::new(handler));
-        }
+        let mut handlers = self.handlers.write_blocking();
+        handlers.insert(key, Box::new(handler));
     }
 }
 
@@ -468,12 +466,13 @@ mod tests {
         println!("All tests passed successfully!");
     }
 
+    type StaticExecutionLog = OnceLock<Arc<smol::lock::Mutex<Vec<(usize, String, &'static str)>>>>;
+
     #[test]
     fn test_yielding_handlers() {
         // TODO: also cover sync handlers
         use std::sync::Arc;
-        static EXECUTION_LOG: OnceLock<Arc<smol::lock::Mutex<Vec<(usize, String, &'static str)>>>> =
-            OnceLock::new();
+        static EXECUTION_LOG: StaticExecutionLog = OnceLock::new();
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let dispatcher = TestDispatcher;
         let mut actor_ref: ActorRef<TestState, TestMessageKey> = ActorBuilder::new()
@@ -590,40 +589,16 @@ mod tests {
     }
 
     // COMPREHENSIVE CONCURRENCY TESTING
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct AsyncNonMutMessage(Option<usize>);
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct AsyncMutMessage(Option<usize>);
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct SyncNonMutMessage(Option<usize>);
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct SyncMutMessage(Option<usize>);
     #[derive(Clone, Debug)]
     struct GetStateMessage;
-
-    impl Default for AsyncNonMutMessage {
-        fn default() -> Self {
-            AsyncNonMutMessage(None)
-        }
-    }
-
-    impl Default for AsyncMutMessage {
-        fn default() -> Self {
-            AsyncMutMessage(None)
-        }
-    }
-
-    impl Default for SyncNonMutMessage {
-        fn default() -> Self {
-            SyncNonMutMessage(None)
-        }
-    }
-
-    impl Default for SyncMutMessage {
-        fn default() -> Self {
-            SyncMutMessage(None)
-        }
-    }
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     enum ConcurrentTestMessageKey {
